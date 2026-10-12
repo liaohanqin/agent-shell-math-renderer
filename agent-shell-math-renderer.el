@@ -1009,7 +1009,16 @@ tooltip can name the engine only once the image exists (see
                     (line-prefix
                      (put-text-property s e 'line-prefix line-prefix)))
               (when wrap-prefix
-                (put-text-property s e 'wrap-prefix wrap-prefix)))))))))
+                (put-text-property s e 'wrap-prefix wrap-prefix))
+              ;; In a table, the cell's padding was measured when the text
+              ;; was still raw LaTeX (this image lands after the layout),
+              ;; so the row is now as much narrower than its column as the
+              ;; image is narrower than that text: have agent-shell pad the
+              ;; cells by what is here now (see
+              ;; `agent-shell-markdown-realign-table-at').
+              (when (and (fboundp 'agent-shell-markdown-realign-table-at)
+                         (get-text-property s 'agent-shell-markdown-table-source))
+                (agent-shell-markdown-realign-table-at s)))))))))
 
 (defun agent-shell-math-renderer--unrendered-regions (latex inline)
   "Return ranges of LATEX / INLINE regions still awaiting their image.
