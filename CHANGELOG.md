@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An equation inside a table cell is no longer drawn once per wrapped
+  line.  agent-shell's table wrapper reflows a cell, and its breaks fell
+  inside a claimed region at the spaces of the LaTeX; each fragment then
+  got the image over it.  The rendered chars are now tagged
+  `agent-shell-markdown-atomic', which tells the wrapper to keep the run
+  whole (agent-shell must know the tag).
 - An equation whose region was rewritten after its compile was scheduled
   but before it landed was left raw for good.  agent-shell re-renders a
   table's cells in place, which carries the renderer's properties over

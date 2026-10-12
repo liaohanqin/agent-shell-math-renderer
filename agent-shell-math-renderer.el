@@ -877,7 +877,11 @@ Keeps the underlying text in place, faces the region
 `agent-shell-math-renderer', tags it `agent-shell-markdown-frozen'
 \(so later passes / streaming calls skip it) with LATEX stashed in
 `agent-shell-math-renderer-source', then hands off to
-`agent-shell-math-renderer--render' for the equation image.
+`agent-shell-math-renderer--render' for the equation image.  The
+chars are tagged `agent-shell-markdown-atomic' too, so a pass that
+reflows the text (agent-shell's table wrapper) keeps the region
+whole: one equation is one image, and every fragment of a split
+region would get it over it.
 
 INLINE non-nil typesets LATEX in text style (for `\\(...\\)'
 inline math) rather than as a display equation; it is stashed in
@@ -905,7 +909,15 @@ the bare equation."
                  agent-shell-math-renderer-source ,latex
                  agent-shell-math-renderer-inline ,inline
                  agent-shell-markdown-frozen t
-                 rear-nonsticky (agent-shell-markdown-frozen)))
+                 ;; One equation is one unit: agent-shell's table wrapper
+                 ;; must not break it across wrapped lines.  Every fragment
+                 ;; of a split region would get the image over it — the
+                 ;; equation drawn once per line — and the image lands
+                 ;; after this pass, from a timer, so the wrapper cannot
+                 ;; see a `display' property to go by.
+                 agent-shell-markdown-atomic t
+                 rear-nonsticky (agent-shell-markdown-frozen
+                                 agent-shell-markdown-atomic)))
     (put-text-property start end 'agent-shell-math-renderer--deferred t)
     (agent-shell-math-renderer--schedule-deferred buffer)))
 

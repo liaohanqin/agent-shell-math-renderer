@@ -724,6 +724,23 @@ reads."
               (lambda (&rest _) ,x-height)))
      ,@body))
 
+(ert-deftest agent-shell-math-renderer-regions-are-atomic ()
+  ;; A claimed region is tagged `agent-shell-markdown-atomic', so a pass
+  ;; that reflows the text (agent-shell's table wrapper) keeps it whole:
+  ;; the image lands later, from a timer, and every fragment of a split
+  ;; region would then get it over it — the equation drawn once per
+  ;; wrapped line.  Inline and display math alike, and the tag stays
+  ;; inside the region.
+  (agent-shell-math-renderer-tests--enabled
+    (dolist (case '(("a \\(x\\) b" 2 7)
+                    ("\\[ x \\]\nb" 0 7)))
+      (let ((out (agent-shell-markdown-convert (nth 0 case)))
+            (start (nth 1 case))
+            (end (nth 2 case)))
+        (should (get-text-property start 'agent-shell-markdown-atomic out))
+        (should (get-text-property (1- end) 'agent-shell-markdown-atomic out))
+        (should-not (get-text-property end 'agent-shell-markdown-atomic out))))))
+
 (ert-deftest agent-shell-math-renderer-refresh-if-changed-detects-font ()
   ;; `--refresh-if-changed' triggers a refresh when only the x-height
   ;; moved (colors unchanged), and targets just the current buffer (the
