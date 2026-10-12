@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- An equation whose region was rewritten after its compile was scheduled
+  but before it landed was left raw for good.  agent-shell re-renders a
+  table's cells in place, which carries the renderer's properties over
+  but collapses the markers the scheduling captured; the callback of the
+  finished compile now re-finds the region by its properties — every
+  region tagged for the same LaTeX with no image — and lays the image
+  where the region is now.
+
 ## [0.13.0] - 2026-10-10
 
 ### Added

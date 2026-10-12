@@ -999,6 +999,50 @@ tooltip can name the engine only once the image exists (see
               (when wrap-prefix
                 (put-text-property s e 'wrap-prefix wrap-prefix)))))))))
 
+(defun agent-shell-math-renderer--unrendered-regions (latex inline)
+  "Return ranges of LATEX / INLINE regions still awaiting their image.
+A region claimed by `agent-shell-math-renderer--apply-region' keeps LATEX
+in `agent-shell-math-renderer-source' and INLINE in
+`agent-shell-math-renderer-inline', and gets a `display' property when its
+equation image lands.  A pass that rewrites the claimed text carries
+those properties over while dropping the image: agent-shell's table pass
+re-renders its cells (delete + insert) to lay a table out, which collapses
+the markers `agent-shell-math-renderer--render' captured, so an async
+compile that lands afterwards has nothing left to overlay.  This finds
+that leftover state — every region tagged for LATEX / INLINE that has no
+`display' property at all — and returns its (START . END) ranges, so the
+callback of a finished compile can lay the image where the region now is.
+
+A region already carrying the image is skipped: a claimed region is
+never split (see agent-shell's table wrapper), so a `display' anywhere in
+one means its image has landed or is landing, and it must not be laid
+again.
+
+For example, with buffer \"see \\=\\(x\\=\\) here\" tagged for LATEX \"x\"
+and no image, returns ((5 . 11))."
+  (let ((regions '())
+        (pos nil))
+    (save-restriction
+      (widen)
+      (setq pos (point-min))
+      (while (setq pos (text-property-not-all
+                        pos (point-max)
+                        'agent-shell-math-renderer-source nil))
+        (let* ((end (or (next-single-property-change
+                         pos 'agent-shell-math-renderer-source nil (point-max))
+                        (point-max)))
+               (source (get-text-property pos 'agent-shell-math-renderer-source))
+               (region-inline (get-text-property
+                               pos 'agent-shell-math-renderer-inline)))
+          (when (and (equal source latex)
+                     (equal region-inline inline)
+                     ;; `text-property-not-all' says some char carries a
+                     ;; `display' — an image, so nothing left to lay.
+                     (null (text-property-not-all pos end 'display nil)))
+            (push (cons pos end) regions))
+          (setq pos end))))
+    (nreverse regions)))
+
 ;; Defined only in an Emacs built with a window system; it is called only
 ;; while a graphical window shows the buffer.
 (declare-function font-info "font.c" (name &optional frame))
@@ -1342,22 +1386,41 @@ then."
                    ;; Read again: the buffer may be displayed now even if it
                    ;; was not when the compile was scheduled, or on another
                    ;; frame.
-                   (let ((frame (agent-shell-math-renderer--display-frame
-                                 buffer)))
-                     (agent-shell-math-renderer--overlay-image
-                      buffer s e
-                      (latex-to-svg-backend
-                       doc :engine engine :fallback fallback :quiet quiet
-                       :rescale-by rescale
-                       :color (agent-shell-math-renderer--foreground-for s frame)
-                       :background (agent-shell-math-renderer--background-for
-                                    frame)
-                       :padding padding
-                       :x-height (agent-shell-math-renderer--x-height-at
-                                  s buffer))
-                      inline
-                      (agent-shell-math-renderer--help-echo
-                       doc latex engine fallback))))))))))))))
+                   (let* ((frame (agent-shell-math-renderer--display-frame
+                                  buffer))
+                          (image (latex-to-svg-backend
+                                  doc :engine engine :fallback fallback
+                                  :quiet quiet
+                                  :rescale-by rescale
+                                  :color (agent-shell-math-renderer--foreground-for
+                                          s frame)
+                                  :background (agent-shell-math-renderer--background-for
+                                               frame)
+                                  :padding padding
+                                  :x-height (agent-shell-math-renderer--x-height-at
+                                             s buffer)))
+                          (echo (agent-shell-math-renderer--help-echo
+                                 doc latex engine fallback)))
+                     (if (and (marker-position s)
+                              (marker-position e)
+                              (<= (point-min) (marker-position s))
+                              (< (marker-position s) (marker-position e))
+                              (<= (marker-position e) (point-max)))
+                         (agent-shell-math-renderer--overlay-image
+                          buffer s e image inline echo)
+                       ;; The claimed text may have been rewritten in place
+                       ;; since scheduling — a pass such as agent-shell's
+                       ;; table pass deletes and re-inserts the region,
+                       ;; carrying our properties over while collapsing the
+                       ;; markers above — so re-find the region by its
+                       ;; properties and lay the image where it is now
+                       ;; (see `--unrendered-regions').
+                       (when image
+                         (dolist (region (agent-shell-math-renderer--unrendered-regions
+                                          latex inline))
+                           (agent-shell-math-renderer--overlay-image
+                            buffer (car region) (cdr region) image inline
+                            echo))))))))))))))))
 
 (defun agent-shell-math-renderer--refresh-buffer (buffer &optional recompile)
   "Re-render every display-math region in BUFFER for the current colors.

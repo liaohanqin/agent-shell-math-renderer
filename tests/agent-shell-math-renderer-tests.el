@@ -1073,6 +1073,58 @@ graphical frame is needed."
         (dolist (call calls)
           (should (eq quiet (plist-get (cdr call) :quiet))))))))
 
+(ert-deftest agent-shell-math-renderer-async-overlay-finds-rewritten-region ()
+  ;; Regression: a compile that lands after its claimed region was
+  ;; rewritten still draws the equation.  agent-shell's table pass
+  ;; re-renders its cells (delete + insert), which carries our properties
+  ;; over but collapses the markers the scheduling captured — the
+  ;; callback used to find s == e, lay nothing, and leave the formula raw
+  ;; for good (the compile had succeeded, so nothing retried it).  The
+  ;; callback now re-finds the region by its properties.
+  (let ((calls 0)
+        (callback nil)
+        (image '(image :type svg :data "<svg/>"))
+        (face-foreground (symbol-function 'face-foreground)))
+    (cl-letf (((symbol-function 'latex-to-svg-backend-available-p) #'always)
+              ((symbol-function 'agent-shell-math-renderer--graphical-p)
+               #'always)
+              ((symbol-function 'agent-shell-math-renderer--display-frame)
+               (lambda (&rest _) (selected-frame)))
+              ((symbol-function 'agent-shell-math-renderer--x-height)
+               (lambda (&rest _) 20))
+              ((symbol-function 'face-foreground)
+               (lambda (face &rest args)
+                 (if (eq face 'default)
+                     agent-shell-math-renderer-tests--default-foreground
+                   (apply face-foreground face args))))
+              ((symbol-function 'agent-shell-math-renderer--appearance)
+               #'ignore)
+              ((symbol-function 'run-at-time) (lambda (&rest _) nil))
+              ((symbol-function 'latex-to-svg-backend)
+               (lambda (_latex &rest keys)
+                 ;; The query and the scheduling request find the equation
+                 ;; still compiling; the callback's re-query hands back the
+                 ;; image.
+                 (setq calls (1+ calls))
+                 (when (plist-get keys :callback)
+                   (setq callback (plist-get keys :callback)))
+                 (and (>= calls 3) image))))
+      (with-temp-buffer
+        (insert "see \\(x\\) here")
+        (agent-shell-math-renderer--apply-region
+         (current-buffer) 5 10 "x" t)
+        ;; The claim is rendered from its timer, after agent-shell's passes.
+        (agent-shell-math-renderer--render-deferred (current-buffer))
+        (should-not (get-text-property 5 'display))
+        ;; Rewrite the region in place, as the table pass does.
+        (let ((text (buffer-substring 5 10)))
+          (delete-region 5 10)
+          (goto-char 5)
+          (insert text))
+        (should-not (get-text-property 5 'display))
+        (funcall callback)
+        (should (eq image (get-text-property 5 'display)))))))
+
 (ert-deftest agent-shell-math-renderer-colors-are-hex-at-every-call ()
   ;; `:color' is the option, or the `default' foreground on the frame that
   ;; shows the buffer when the option is nil, and `:background' the option;
