@@ -20,6 +20,8 @@
 (require 'ert)
 ;; Defines `text-scale-mode-hook', which a test reads.
 (require 'face-remap)
+;; `lm-header' reads the package's headers in the drift guard.
+(require 'lisp-mnt)
 ;; `display-warning' is autoloaded, and `cl-letf' resolving that autoload loads
 ;; warnings.el, which redefines it -- clobbering a stub installed in the same
 ;; `cl-letf'.  Load it up front so stubbing it is deterministic.
@@ -57,27 +59,29 @@
 ;; `agent-shell-math-renderer-mode'.  These tests drive the pipeline through
 ;; `agent-shell-markdown-convert' in throwaway buffers (no mode), so install
 ;; the hook globally for the suite; it still no-ops unless a test opts in by
-;; binding `agent-shell-math-renderer-enabled' (checked via `--active-p').
+;; binding the default value of `agent-shell-math-renderer-mode' (checked via
+;; `--active-p').  A plain `let' of the mode variable would bind only the
+;; current buffer's value, which a `with-temp-buffer' inside it does not see.
 (add-hook 'agent-shell-markdown-render-functions
           #'agent-shell-math-renderer--render-hook)
 
 (defmacro agent-shell-math-renderer-tests--enabled (&rest body)
   "Evaluate BODY with math rendering enabled.
-`agent-shell-math-renderer-enabled' (the master switch) defaults to
-nil, so every test that expects equations to render must opt in;
-this binds it for the default delimiter set (`bracket')."
+`agent-shell-math-renderer-mode' is off by default, so every test
+that expects equations to render must opt in; this binds its default
+value for the default delimiter set (`bracket')."
   (declare (indent 0) (debug t))
-  `(let ((agent-shell-math-renderer-enabled t))
+  `(cl-letf (((default-value 'agent-shell-math-renderer-mode) t))
      ,@body))
 
 (defmacro agent-shell-math-renderer-tests--with-dollar (&rest body)
   "Evaluate BODY with math rendering on and `$$...$$' enabled.
 `agent-shell-math-renderer-delimiters' defaults to `bracket' only,
-so the dollar-delimited tests opt into `dollar' (and the master
-`agent-shell-math-renderer-enabled' switch) through this one binding."
+so the dollar-delimited tests opt into `dollar' (and
+`agent-shell-math-renderer-mode') through this one binding."
   (declare (indent 0) (debug t))
-  `(let ((agent-shell-math-renderer-enabled t)
-         (agent-shell-math-renderer-delimiters '(dollar bracket)))
+  `(cl-letf (((default-value 'agent-shell-math-renderer-mode) t)
+             (agent-shell-math-renderer-delimiters '(dollar bracket)))
      ,@body))
 
 (ert-deftest agent-shell-math-renderer-display-math-protects-markup ()
@@ -167,8 +171,8 @@ $$ x $$
   ;; independently: with only `bracket' enabled, a block-level
   ;; `\\[...\\]' renders while `$$...$$' is left as plain text (and its
   ;; `**' inside is processed as ordinary markup).
-  (let ((agent-shell-math-renderer-enabled t)
-        (agent-shell-math-renderer-delimiters '(bracket)))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) t)
+            (agent-shell-math-renderer-delimiters '(bracket)))
     (should (equal (agent-shell-markdown--deconstruct
                     (agent-shell-markdown-convert
                      "$$ **b** $$
@@ -186,8 +190,8 @@ $$ x $$
   ;; `\[' / `\]' are shown as `[' / `]' -- agent-shell 0.66.1+ unescapes
   ;; backslash-escaped punctuation per CommonMark (only frozen math is
   ;; spared, so this text isn't).
-  (let ((agent-shell-math-renderer-enabled t)
-        (agent-shell-math-renderer-delimiters '()))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) t)
+            (agent-shell-math-renderer-delimiters '()))
     (should (equal (agent-shell-markdown--deconstruct
                     (agent-shell-markdown-convert
                      "x \\[ **y** \\] z"))
@@ -395,7 +399,7 @@ x = 1
   ;; becomes bold) — math rendering is fully gated.  The unclaimed
   ;; `\[' / `\]' show unescaped as `[' / `]' (agent-shell 0.66.1+
   ;; CommonMark backslash-unescaping).
-  (let ((agent-shell-math-renderer-enabled nil))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) nil))
     (should (equal (agent-shell-markdown--deconstruct
                     (agent-shell-markdown-convert "before \\[ **x** \\] after"))
                    '(("before [ " nil)
@@ -405,9 +409,9 @@ x = 1
 (ert-deftest agent-shell-math-renderer-fenced-math-as-code-when-off ()
   ;; With the master switch off, a ```math fence is left as an ordinary
   ;; code block (source-block face), not a math equation.
-  (let* ((agent-shell-math-renderer-enabled nil)
-         (runs (agent-shell-markdown--deconstruct
-                (agent-shell-markdown-convert "```math
+  (cl-letf* (((default-value 'agent-shell-math-renderer-mode) nil)
+             (runs (agent-shell-markdown--deconstruct
+                    (agent-shell-markdown-convert "```math
 E=mc^2
 ```"))))
     (should-not (seq-some (lambda (run)
@@ -422,8 +426,8 @@ E=mc^2
   ;; even on a graphical frame and with the feature on, equations are still
   ;; recognized and faced (markup protected), but no image is overlaid and
   ;; conversion never errors — the raw LaTeX simply shows as faced text.
-  ;; (A user who doesn't want even that sets `agent-shell-math-renderer-enabled'
-  ;; to nil; there is deliberately no PNG fallback.)
+  ;; (A user who doesn't want even that turns `agent-shell-math-renderer-mode'
+  ;; off; there is deliberately no PNG fallback.)
   (agent-shell-math-renderer-tests--enabled
     (cl-letf (((symbol-function 'image-type-available-p) (lambda (_) nil))
               ((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
@@ -532,14 +536,14 @@ E=mc^2
       (should (equal (buffer-substring-no-properties start end)
                      "a\\\\)b")))))
 
-(ert-deftest agent-shell-math-renderer-escaped-inline-tail-not-protected ()
+(ert-deftest agent-shell-math-renderer-escaped-inline-tail-no-watermark ()
   ;; An escaped opener is no opener, so there is no still-streaming inline
-  ;; tail to freeze: `--protect-inline-tail' must return nil rather than
-  ;; freeze the rest of the buffer (which would also block the escape pass
-  ;; from ever unescaping the literal).
+  ;; tail: `--inline-tail' must return nil rather than hold the frontier
+  ;; (which would also keep the escape pass from ever unescaping the
+  ;; literal).
   (with-temp-buffer
     (insert "\\\\(t=0")
-    (should-not (agent-shell-math-renderer--protect-inline-tail nil))))
+    (should-not (agent-shell-math-renderer--inline-tail nil))))
 
 (ert-deftest agent-shell-math-renderer-inline-math-in-inline-code-untouched ()
   ;; A `\\(...\\)' inside an inline-code span is literal code, not math:
@@ -655,10 +659,11 @@ after text.
   ;; different streaming chunks must still render.  agent-shell 0.66.1+
   ;; unescapes an unclaimed `\(' (`\(' -> `(') during its CommonMark
   ;; escape pass, which would destroy the opener before the closer
-  ;; streams in.  `--protect-inline-tail' freezes the still-open opener
-  ;; each chunk (lifting it again next chunk via `--release-inline-pending')
-  ;; so the delimiter survives and the completed span renders.  Stream at
-  ;; several chunk sizes to hit the boundary that splits the span.
+  ;; streams in.  The watermark `--inline-tail' returns at the still-open
+  ;; opener makes agent-shell (0.89.4+) leave the tail alone for the rest
+  ;; of the chunk, so the delimiter survives and the completed span
+  ;; renders.  Stream at several chunk sizes to hit the boundary that
+  ;; splits the span.
   (agent-shell-math-renderer-tests--enabled
     (dolist (step '(1 2 3 5 40 100))
       (let ((rendered
@@ -676,8 +681,8 @@ after text.
   ;; `agent-shell-math-renderer-render-inline' nil disables `\\(...\\)'
   ;; even with the master switch on: delimiters are plain and inner
   ;; markup (`**x**') is processed normally.
-  (let ((agent-shell-math-renderer-enabled t)
-        (agent-shell-math-renderer-render-inline nil))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) t)
+            (agent-shell-math-renderer-render-inline nil))
     (should (equal (agent-shell-markdown--deconstruct
                     (agent-shell-markdown-convert "a \\( **x** \\) b"))
                    '(("a ( " nil)
@@ -689,7 +694,7 @@ after text.
   ;; inner markup is processed (here `**x**' becomes bold).  The
   ;; unclaimed `\(' / `\)' show unescaped as `(' / `)' (agent-shell
   ;; 0.66.1+ CommonMark backslash-unescaping).
-  (let ((agent-shell-math-renderer-enabled nil))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) nil))
     (should (equal (agent-shell-markdown--deconstruct
                     (agent-shell-markdown-convert "a \\( **x** \\) b"))
                    '(("a ( " nil)
@@ -745,8 +750,8 @@ reads."
   ;; `--refresh-if-changed' triggers a refresh when only the x-height
   ;; moved (colors unchanged), and targets just the current buffer (the
   ;; one the hook made relevant) rather than every buffer.
-  (let ((agent-shell-math-renderer-enabled t)
-        (refreshed nil))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) t)
+            (refreshed nil))
     (with-temp-buffer
       (setq agent-shell-math-renderer--present t)
       ;; Buffer was last rendered at x-height 20; same colors.
@@ -821,8 +826,8 @@ reads."
 (ert-deftest agent-shell-math-renderer-refresh-if-changed-skips-non-present ()
   ;; In a buffer with no equations (`--present' nil), a hook firing is a
   ;; no-op even if the appearance differs — nothing to re-render.
-  (let ((agent-shell-math-renderer-enabled t)
-        (refreshed nil))
+  (cl-letf (((default-value 'agent-shell-math-renderer-mode) t)
+            (refreshed nil))
     (with-temp-buffer
       (setq agent-shell-math-renderer--present nil)
       (setq agent-shell-math-renderer--rendered-appearance nil)
@@ -1037,7 +1042,7 @@ graphical frame is needed."
         (should (= 2 (length calls)))
         (let ((callback (plist-get (cdar calls) :callback))
               (agent-shell-math-renderer-engine 'latex))
-          (funcall callback))
+          (funcall callback nil))
         (should (= 3 (length calls)))
         (dolist (call calls)
           (should (eq engine (plist-get (cdr call) :engine))))))))
@@ -1070,7 +1075,7 @@ graphical frame is needed."
          (current-buffer) (point-min) (point-max) "x"))
       (let ((callback (plist-get (cdar calls) :callback))
             (agent-shell-math-renderer-fallback nil))
-        (funcall callback))
+        (funcall callback nil))
       (should (= 3 (length calls)))
       (should (eq 'latex (plist-get (cdar calls) :fallback))))))
 
@@ -1085,7 +1090,7 @@ graphical frame is needed."
         (let ((agent-shell-math-renderer-quiet quiet))
           (agent-shell-math-renderer--render
            (current-buffer) (point-min) (point-max) "x"))
-        (funcall (plist-get (cdar calls) :callback))
+        (funcall (plist-get (cdar calls) :callback) nil)
         (should (= 3 (length calls)))
         (dolist (call calls)
           (should (eq quiet (plist-get (cdr call) :quiet))))))))
@@ -1139,7 +1144,7 @@ graphical frame is needed."
           (goto-char 5)
           (insert text))
         (should-not (get-text-property 5 'display))
-        (funcall callback)
+        (funcall callback nil)
         (should (eq image (get-text-property 5 'display)))))))
 
 (ert-deftest agent-shell-math-renderer-colors-are-hex-at-every-call ()
@@ -1162,7 +1167,7 @@ graphical frame is needed."
                 (agent-shell-math-renderer-background-color (nth 1 case)))
             (agent-shell-math-renderer--render
              (current-buffer) (point-min) (point-max) "x" t)
-            (funcall (plist-get (cdar calls) :callback)))
+            (funcall (plist-get (cdar calls) :callback) nil))
           (should (= 3 (length calls)))
           (dolist (call calls)
             (should (equal (nth 2 case) (plist-get (cdr call) :color)))
@@ -1187,11 +1192,158 @@ graphical frame is needed."
             (should-not (plist-get (cdr call) :color))
             (should-not (plist-get (cdr call) :x-height)))
           (setq shown t)
-          (funcall (plist-get (cdar calls) :callback))
+          (funcall (plist-get (cdar calls) :callback) nil)
           (should (= 3 (length calls)))
           (should (equal agent-shell-math-renderer-tests--default-foreground
                          (plist-get (cdar calls) :color)))
           (should (= 20 (plist-get (cdar calls) :x-height))))))))
+
+(ert-deftest agent-shell-math-renderer-failure-leaves-source ()
+  ;; A callback called with a failure plist does not call the backend
+  ;; again, and leaves the source in the buffer with no image over it.
+  (agent-shell-math-renderer-tests--with-backend-calls calls
+    (with-temp-buffer
+      (insert "\\(\\notacommand\\)")
+      (agent-shell-math-renderer--render
+       (current-buffer) (point-min) (point-max) "\\notacommand" t)
+      (should (= 2 (length calls)))
+      (funcall (plist-get (cdar calls) :callback)
+               '(:kind formula :engine latex
+                 :message "Undefined control sequence." :line 1 :column 13
+                 :log nil :program nil))
+      (should (= 2 (length calls)))
+      (should (equal "\\(\\notacommand\\)" (buffer-string)))
+      (should-not (get-text-property (point-min) 'display)))))
+
+;; What the backend passes the callback when LaTeX rejects an equation.
+(defconst agent-shell-math-renderer-tests--failure
+  '(:kind formula :engine latex :message "Undefined control sequence"
+    :line 1 :column 13 :log "/tmp/asmr-tests.log" :program nil))
+
+(defmacro agent-shell-math-renderer-tests--with-failed-equation (calls &rest body)
+  "Evaluate BODY in a buffer holding one equation whose request failed.
+The equation is `\\(\\notacommand\\)', rendered with the backend
+stubbed (see `agent-shell-math-renderer-tests--with-backend-calls',
+which binds CALLS), and its callback called with
+`agent-shell-math-renderer-tests--failure'."
+  (declare (indent 1) (debug t))
+  `(agent-shell-math-renderer-tests--with-backend-calls ,calls
+     (with-temp-buffer
+       (insert "\\(\\notacommand\\)")
+       (add-text-properties
+        (point-min) (point-max)
+        '(agent-shell-math-renderer-source "\\notacommand"
+          help-echo "\\=\\notacommand"))
+       (agent-shell-math-renderer--render
+        (current-buffer) (point-min) (point-max) "\\notacommand" t)
+       (funcall (plist-get (cdar ,calls) :callback)
+                agent-shell-math-renderer-tests--failure)
+       ,@body)))
+
+(defun agent-shell-math-renderer-tests--failure-marks ()
+  "Return the failure marks in the current buffer."
+  (seq-filter (lambda (ov) (overlay-get ov 'agent-shell-math-renderer-failure))
+              (overlays-in (point-min) (point-max))))
+
+(ert-deftest agent-shell-math-renderer-failure-help-echo ()
+  ;; `help-echo' names the engine and gives the message, as written:
+  ;; Emacs runs it through `substitute-command-keys'.  It does not name
+  ;; the log: `agent-shell-math-renderer-show-error-log' opens it.
+  (dolist (case
+           `((,agent-shell-math-renderer-tests--failure
+              . "LaTeX could not typeset it: Undefined control sequence.")
+             ;; In a tooltip, the command that opens the log follows.
+             ((tooltip . ,agent-shell-math-renderer-tests--failure)
+              . ,(concat "LaTeX could not typeset it: Undefined control "
+                         "sequence. Call M-x "
+                         "agent-shell-math-renderer-show-error-log with point "
+                         "in the equation to open the log."))
+             ((:kind formula :engine ratex :message "Unknown command `\\x'")
+              . "RaTeX could not parse it: Unknown command `\\x'.")
+             ((:kind formula :engine ratex :message "Unexpected end!")
+              . "RaTeX could not parse it: Unexpected end!")
+             ((:kind formula :engine texres)
+              . "texres could not typeset it.")
+             ((:kind setup :engine texres :program "pdftocairo"
+               :message "The texres engine could not run `pdftocairo': program not found.")
+              . "The texres engine could not run `pdftocairo': program not found.")))
+    (should (equal (substitute-command-keys
+                    (if (eq (caar case) 'tooltip)
+                        (agent-shell-math-renderer--failure-help-echo
+                         (cdar case) t)
+                      (agent-shell-math-renderer--failure-help-echo (car case))))
+                   (cdr case)))))
+
+(ert-deftest agent-shell-math-renderer-failure-mark ()
+  ;; A failed equation gets the icon before its source, with the tooltip
+  ;; of the source.  The next render removes the mark and gives the source
+  ;; its own tooltip back; with the option off, no mark is shown.
+  (agent-shell-math-renderer-tests--with-failed-equation calls
+    (let* ((marks (agent-shell-math-renderer-tests--failure-marks))
+           (mark (overlay-get (car marks) 'before-string)))
+      (should (= 1 (length marks)))
+      (should (string-prefix-p
+               (substring-no-properties
+                (icon-string 'agent-shell-math-renderer-failure))
+               mark))
+      (should (equal (get-text-property 0 'help-echo mark)
+                     (get-text-property (point-min) 'help-echo)))
+      (should (string-suffix-p "to open the log."
+                               (substitute-command-keys
+                                (get-text-property (point-min) 'help-echo))))
+      (should (equal (get-text-property
+                      (point-min) 'agent-shell-math-renderer-failure)
+                     agent-shell-math-renderer-tests--failure))
+      ;; A second failure of the same equation does not add a second mark.
+      (funcall (plist-get (cdar calls) :callback)
+               agent-shell-math-renderer-tests--failure)
+      (should (= 1 (length (agent-shell-math-renderer-tests--failure-marks)))))
+    (agent-shell-math-renderer--render
+     (current-buffer) (point-min) (point-max) "\\notacommand" t)
+    (should-not (agent-shell-math-renderer-tests--failure-marks))
+    (should-not (get-text-property (point-min) 'agent-shell-math-renderer-failure))
+    (should (equal (get-text-property (point-min) 'help-echo)
+                   "\\=\\notacommand"))
+    (let ((agent-shell-math-renderer-failure-mark nil))
+      (funcall (plist-get (cdar calls) :callback)
+               agent-shell-math-renderer-tests--failure)
+      (should-not (agent-shell-math-renderer-tests--failure-marks))
+      (should (get-text-property
+               (point-min) 'agent-shell-math-renderer-failure)))))
+
+(ert-deftest agent-shell-math-renderer-show-error-log ()
+  ;; The command opens the log of the failed equation at point.  With no
+  ;; log, or a log file that is gone, it shows the error.  Elsewhere it is
+  ;; an error.
+  (agent-shell-math-renderer-tests--with-failed-equation calls
+    (let* ((log (make-temp-file "asmr-log"))
+           (opened nil)
+           (messages nil)
+           (fail (lambda (log)
+                   (funcall (plist-get (cdar calls) :callback)
+                            (plist-put (copy-sequence
+                                        agent-shell-math-renderer-tests--failure)
+                                       :log log)))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'find-file-other-window)
+                     (lambda (file) (push file opened)))
+                    ((symbol-function 'message)
+                     (lambda (format &rest args)
+                       (push (apply #'format-message format args) messages))))
+            (funcall fail log)
+            (goto-char 3)
+            (agent-shell-math-renderer-show-error-log)
+            (should (equal opened (list log)))
+            (dolist (gone (list nil (concat log ".gone")))
+              (funcall fail gone)
+              (agent-shell-math-renderer-show-error-log)
+              (should (string-prefix-p "LaTeX could not typeset it: Undefined"
+                                       (car messages))))
+            (should (= (length opened) 1))
+            (goto-char (point-max))
+            (should-error (agent-shell-math-renderer-show-error-log)
+                          :type 'user-error))
+        (delete-file log)))))
 
 (ert-deftest agent-shell-math-renderer-no-render-without-graphical-frame ()
   ;; With no graphical frame the backend is not called and the signature is
@@ -1277,12 +1429,11 @@ graphical frame is needed."
          (current-buffer) (point-min) (point-max) "x")
         (should (= 2 (length calls)))))))
 
-(ert-deftest agent-shell-math-renderer-unresolved-option-color-warns-once ()
-  ;; A name the frame cannot resolve is reported once and ignored: the
+(ert-deftest agent-shell-math-renderer-unresolved-option-color-is-ignored ()
+  ;; A name the frame cannot resolve is ignored with no warning: the
   ;; equation takes the `default' foreground.
   (agent-shell-math-renderer-tests--with-backend-calls calls
-    (let ((agent-shell-math-renderer--warned-colors nil)
-          (agent-shell-math-renderer-foreground-color "no-such-color")
+    (let ((agent-shell-math-renderer-foreground-color "no-such-color")
           (warnings 0))
       (cl-letf (((symbol-function 'color-values) #'ignore)
                 ((symbol-function 'display-warning)
@@ -1291,9 +1442,7 @@ graphical frame is needed."
           (insert "xx")
           (agent-shell-math-renderer--render
            (current-buffer) (point-min) (point-max) "x")
-          (agent-shell-math-renderer--render
-           (current-buffer) (point-min) (point-max) "x")
-          (should (= 1 warnings))
+          (should (= 0 warnings))
           (dolist (call calls)
             (should (equal agent-shell-math-renderer-tests--default-foreground
                            (plist-get (cdr call) :color)))))))))
@@ -1430,7 +1579,9 @@ strings, and the buffer font has an x-height of 18."
            (cl-letf (((symbol-function 'agent-shell-math-renderer--graphical-p)
                       #'always)
                      ((symbol-function 'agent-shell-math-renderer--display-window)
-                      (lambda (_buffer) (selected-window)))
+                      (lambda (buffer)
+                        (set-window-buffer (selected-window) buffer)
+                        (selected-window)))
                      ((symbol-function 'agent-shell-math-renderer--display-frame)
                       (lambda (_buffer) (selected-frame)))
                      ((symbol-function 'agent-shell-math-renderer--x-height)
@@ -1468,13 +1619,12 @@ strings, and the buffer font has an x-height of 18."
           (should (equal (agent-shell-math-renderer--foreground-for 13 frame)
                          "#123456")))))))
 
-(ert-deftest agent-shell-math-renderer-option-color-not-a-string-warns-once ()
-  ;; A value that is not a string, such as the symbol `black', is reported
-  ;; once and treated as nil, like a name the frame cannot resolve; it does
+(ert-deftest agent-shell-math-renderer-option-color-not-a-string-is-ignored ()
+  ;; A value that is not a string, such as the symbol `black', is treated
+  ;; as nil with no warning, like a name the frame cannot resolve; it does
   ;; not signal, which would stop every equation from being drawn.
   (agent-shell-math-renderer-tests--with-frame
-    (let ((agent-shell-math-renderer--warned-colors nil)
-          (agent-shell-math-renderer-foreground-color 'black)
+    (let ((agent-shell-math-renderer-foreground-color 'black)
           (agent-shell-math-renderer-background-color 'white)
           (warnings nil)
           (frame (selected-frame)))
@@ -1482,11 +1632,64 @@ strings, and the buffer font has an x-height of 18."
                  (lambda (_type message &rest _) (push message warnings))))
         (with-temp-buffer
           (insert "\\(a\\)")
-          (dotimes (_ 2)
-            (should (equal (agent-shell-math-renderer--foreground-for 1 frame)
-                           "#ffffff"))
-            (should-not (agent-shell-math-renderer--background-for frame)))))
-      (should (= (length warnings) 2)))))
+          (should (equal (agent-shell-math-renderer--foreground-for 1 frame)
+                         "#ffffff"))
+          (should-not (agent-shell-math-renderer--background-for frame))))
+      (should-not warnings))))
+
+(ert-deftest agent-shell-math-renderer-mode-checks-color-options ()
+  ;; The mode warns about each color option that is not a color, each time
+  ;; it turns on, and again in each buffer updated after an option is set.
+  ;; A good value, or nil, gives no warning; with no graphical frame it
+  ;; checks nothing.  The subscription is stubbed so a plain buffer
+  ;; suffices.
+  (let ((warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &rest _) (push message warnings)))
+              ((symbol-function 'agent-shell-subscribe-to)
+               (lambda (&rest _) 'token))
+              ((symbol-function 'agent-shell-unsubscribe)
+               (lambda (&rest _) nil)))
+      (agent-shell-math-renderer-tests--with-frame
+        (let ((agent-shell-math-renderer-foreground-color "no-such-color")
+              (agent-shell-math-renderer-background-color 'white))
+          (with-temp-buffer
+            (agent-shell-math-renderer-mode 1)
+            (should (= (length warnings) 2))
+            (should (seq-some
+                     (lambda (w)
+                       (string-match-p
+                        "`agent-shell-math-renderer-foreground-color' is \"no-such-color\""
+                        w))
+                     warnings))
+            (agent-shell-math-renderer-mode -1)
+            (agent-shell-math-renderer-mode 1)
+            (should (= (length warnings) 4))
+            (setq warnings nil)
+            (setq-local agent-shell-math-renderer--present t)
+            (cl-letf (((symbol-function 'agent-shell-math-renderer--refresh-buffer)
+                       #'ignore))
+              (unwind-protect
+                  (progn
+                    (setq-local agent-shell-math-renderer-foreground-color "red")
+                    (agent-shell-math-renderer--update-after-option))
+                (when (timerp agent-shell-math-renderer--option-timer)
+                  (cancel-timer agent-shell-math-renderer--option-timer))
+                (setq agent-shell-math-renderer--option-timer nil
+                      agent-shell-math-renderer--option-buffers nil
+                      agent-shell-math-renderer--option-defaults nil)))
+            (should (= (length warnings) 1))
+            (should (string-match-p "background-color" (car warnings)))))
+        (setq warnings nil)
+        (let ((agent-shell-math-renderer-foreground-color "red")
+              (agent-shell-math-renderer-background-color nil))
+          (with-temp-buffer
+            (agent-shell-math-renderer-mode 1)
+            (should-not warnings))))
+      (let ((agent-shell-math-renderer-foreground-color "no-such-color"))
+        (with-temp-buffer
+          (agent-shell-math-renderer-mode 1)
+          (should-not warnings))))))
 
 (ert-deftest agent-shell-math-renderer-render-is-deferred ()
   ;; Every equation, inline or display, is tagged and rendered from one
@@ -1566,7 +1769,7 @@ strings, and the buffer font has an x-height of 18."
             (agent-shell-markdown-replace-markup)
             (agent-shell-math-renderer--render-deferred (current-buffer))
             (setq ready t)
-            (mapc #'funcall callbacks)
+            (dolist (callback callbacks) (funcall callback nil))
             (goto-char (point-min))
             (search-forward "\\(")
             (should (eq 'image (car-safe (get-text-property
@@ -1605,6 +1808,29 @@ strings, and the buffer font has an x-height of 18."
           (should (equal (sort (delete-dups sizes)
                                (lambda (x y) (string< (car x) (car y))))
                          '(("$a$" . 9.0) ("$b$" . 13.5) ("\\[ c \\]" . 13.5)))))))))
+
+(ert-deftest agent-shell-math-renderer-x-height-at-outside-the-buffer ()
+  ;; A POS outside the accessible part of the buffer, such as the marker of
+  ;; a deleted equation at `point-max', or text outside a narrowing, gets
+  ;; the buffer font's x-height (18 in `--with-frame').  The stub of
+  ;; `font-at' signals there, as the real one does.
+  (agent-shell-math-renderer-tests--with-frame
+    (cl-letf (((symbol-function 'font-at)
+               (lambda (pos &rest _)
+                 (unless (and (<= (point-min) pos) (< pos (point-max)))
+                   (signal 'args-out-of-range
+                           (list pos (point-min) (point-max))))
+                 'plain-font))
+              ((symbol-function 'query-font)
+               (lambda (_font) ["plain" nil 20 nil 20 5 nil nil nil]))
+              ((symbol-function 'agent-shell-math-renderer--x-height-ratio)
+               (lambda (&rest _) 0.5)))
+      (with-temp-buffer
+        (insert "abc")
+        (should (equal (agent-shell-math-renderer--x-height-at 2) 10.0))
+        (should (equal (agent-shell-math-renderer--x-height-at 4) 18))
+        (narrow-to-region 2 3)
+        (should (equal (agent-shell-math-renderer--x-height-at 1) 18))))))
 
 (ert-deftest agent-shell-math-renderer-help-echo-names-the-engine ()
   ;; Once the image is laid, the tooltip names the engine before the LaTeX,
@@ -1671,8 +1897,28 @@ strings, and the buffer font has an x-height of 18."
                      '(agent-shell-math-renderer-padding-inline)))
       (should (= 1 scheduled)))))
 
+(ert-deftest agent-shell-math-renderer-backend-options-are-watched ()
+  ;; The backend's options in the cache key that a project sets in
+  ;; `.dir-locals.el' (the three preambles, the files two of them load,
+  ;; the width of numbered equations, RaTeX's macros) update the equations
+  ;; like this package's own options.
+  (dolist (option '(latex-to-svg-backend-preamble-base
+                    latex-to-svg-backend-preamble-packages
+                    latex-to-svg-backend-preamble-not-precompiled
+                    latex-to-svg-backend-preamble-package-files
+                    latex-to-svg-backend-preamble-not-precompiled-files
+                    latex-to-svg-backend-line-width
+                    latex-to-svg-backend-ratex-macros))
+    (should (memq #'agent-shell-math-renderer--option-changed
+                  (get-variable-watchers option))))
+  ;; No backend option is named by an obsolete alias: users read the new
+  ;; names.
+  (dolist (option agent-shell-math-renderer--watched-options)
+    (when (string-prefix-p "latex-to-svg-backend-" (symbol-name option))
+      (should-not (get option 'byte-obsolete-variable)))))
+
 (ert-deftest agent-shell-math-renderer-option-default-skips-buffers-with-own-value ()
-  ;; A change of `latex-to-svg-backend-preamble-not-precompiled''s default
+  ;; A change of `latex-to-svg-backend-preamble-packages''s default
   ;; updates the chats that use the default, not a chat with its own value
   ;; (set by its `.dir-locals.el').  A buffer-local change updates that chat.
   (let ((agent-shell-math-renderer--option-buffers nil)
@@ -1689,14 +1935,14 @@ strings, and the buffer font has an x-height of 18."
             (with-current-buffer buf
               (setq agent-shell-math-renderer--present t)))
           (with-current-buffer own
-            (setq-local latex-to-svg-backend-preamble-not-precompiled
+            (setq-local latex-to-svg-backend-preamble-packages
                         "\\input{m}"))
           (should (equal agent-shell-math-renderer--option-buffers (list own)))
           (agent-shell-math-renderer--update-after-option)
           (should (equal updated (list own)))
           (setq updated nil)
-          (let ((latex-to-svg-backend-preamble-not-precompiled ""))
-            (setq latex-to-svg-backend-preamble-not-precompiled "\\input{g}")
+          (let ((latex-to-svg-backend-preamble-packages ""))
+            (setq latex-to-svg-backend-preamble-packages "\\input{g}")
             (agent-shell-math-renderer--update-after-option)
             (should (equal updated (list uses-default)))))
       (kill-buffer own)
@@ -1892,7 +2138,7 @@ strings, and the buffer font has an x-height of 18."
             (insert "prompt \\(x\\)")
             (setq-local comint-last-input-start (copy-marker (point-min)))
             (setq-local comint-last-input-end (copy-marker (point-max)))
-            (setq-local agent-shell-math-renderer-enabled t)
+            (setq-local agent-shell-math-renderer-mode t)
             (setq-local agent-shell-math-renderer-render-submitted-prompts t))
           (with-temp-buffer
             (cl-letf (((symbol-function 'run-at-time)
@@ -1918,15 +2164,22 @@ strings, and the buffer font has an x-height of 18."
     (with-temp-buffer
       (cl-letf (((symbol-function 'agent-shell-subscribe-to)
                  (lambda (&rest plist)
-                   (setq args plist)
+                   (setq args (append args (list plist)))
                    'fake-subscription)))
         (agent-shell-math-renderer--maybe-subscribe-prompts))
-      (should (eq agent-shell-math-renderer--prompt-subscription
-                  'fake-subscription))
-      (should (eq (plist-get args :shell-buffer) (current-buffer)))
-      (should (eq (plist-get args :event) 'input-submitted))
-      (should (eq (plist-get args :on-event)
-                  #'agent-shell-math-renderer--on-input-submitted)))))
+      (should (equal agent-shell-math-renderer--prompt-subscriptions
+                     '(fake-subscription fake-subscription)))
+      (should (equal (seq-map (lambda (plist) (plist-get plist :shell-buffer))
+                              args)
+                     (list (current-buffer) (current-buffer))))
+      (should (equal (seq-map (lambda (plist)
+                                (list (plist-get plist :event)
+                                      (plist-get plist :on-event)))
+                              args)
+                     '((input-submitted
+                        agent-shell-math-renderer--on-input-submitted)
+                       (session-restored
+                        agent-shell-math-renderer--on-session-restored)))))))
 
 (ert-deftest agent-shell-math-renderer-input-submitted-handler-uses-current-buffer ()
   ;; The event handler keeps agent-shell's ordinary one-argument callback shape,
@@ -1955,7 +2208,7 @@ strings, and the buffer font has an x-height of 18."
       (insert "prompt \\(x\\)")
       (let ((comint-last-input-start (copy-marker (point-min)))
             (comint-last-input-end (copy-marker (point-max)))
-            (agent-shell-math-renderer-enabled t)
+            (agent-shell-math-renderer-mode t)
             (agent-shell-math-renderer-render-submitted-prompts nil))
         (cl-letf (((symbol-function 'run-at-time)
                    (lambda (&rest _)
@@ -2011,6 +2264,207 @@ strings, and the buffer font has an x-height of 18."
                         (point)
                         'agent-shell-math-renderer-source)
                        "E=mc^2"))))))
+
+(defun agent-shell-math-renderer-tests--insert-prompt (input &optional sent)
+  "Insert a shell prompt with INPUT, as agent-shell does.
+With SENT, end INPUT with shell-maker's end-of-prompt marker."
+  (insert (propertize "Claude> " 'field 'output
+                      'font-lock-face 'agent-shell-prompt)
+          (propertize input 'font-lock-face 'agent-shell-input))
+  (when sent
+    (insert (propertize "<shell-maker-end-of-prompt>"
+                        'invisible t 'shell-maker--marker t))))
+
+(ert-deftest agent-shell-math-renderer-session-restored-renders-replayed-prompts ()
+  ;; A restore replays each user prompt with no markdown render and no
+  ;; `input-submitted'.  `session-restored' renders those prompts, without
+  ;; the shell prompt before them and without the agent's text.
+  (agent-shell-math-renderer-tests--enabled
+    (with-temp-buffer
+      (agent-shell-math-renderer-tests--insert-prompt
+       "\\[\nx^2\n\\]\nand \\(y\\)" t)
+      (insert "\n\nagent \\(z\\)\n\n")
+      (let ((agent-shell-math-renderer-render-submitted-prompts t)
+            scheduled)
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (push (cons function args) scheduled))))
+          (agent-shell-math-renderer--on-session-restored
+           '((:event . session-restored))))
+        (should (= (length scheduled) 1))
+        (apply (car (car scheduled)) (cdr (car scheduled)))
+        (goto-char (point-min))
+        (should-not (get-text-property (point)
+                                       'agent-shell-math-renderer-source))
+        (search-forward "\\[")
+        (should (equal (get-text-property (match-beginning 0)
+                                          'agent-shell-math-renderer-source)
+                       "x^2"))
+        (search-forward "\\(y")
+        (should (equal (get-text-property (match-beginning 0)
+                                          'agent-shell-math-renderer-source)
+                       "y"))
+        (search-forward "\\(z")
+        (should-not (get-text-property (match-beginning 0)
+                                       'agent-shell-math-renderer-source))))))
+
+(ert-deftest agent-shell-math-renderer-session-restored-skips-live-prompt ()
+  ;; Text typed into the live prompt during a restore is not sent yet, so
+  ;; it is not rendered.  Its input starts at the process mark.
+  (agent-shell-math-renderer-tests--enabled
+    (with-temp-buffer
+      (agent-shell-math-renderer-tests--insert-prompt "\\(y\\)" t)
+      (insert "\n\n")
+      (agent-shell-math-renderer-tests--insert-prompt "")
+      (let ((process (make-pipe-process :name "agent-shell-math-renderer-test"
+                                        :buffer (current-buffer)
+                                        :noquery t)))
+        (unwind-protect
+            (progn
+              (set-marker (process-mark process) (point))
+              (insert "\\(draft\\)")
+              (should (equal (seq-map
+                              (lambda (region)
+                                (buffer-substring-no-properties
+                                 (car region) (cdr region)))
+                              (agent-shell-math-renderer--replayed-prompt-regions))
+                             '("\\(y\\)"))))
+          (delete-process process))))))
+
+(ert-deftest agent-shell-math-renderer-session-restored-respects-option ()
+  (agent-shell-math-renderer-tests--enabled
+    (with-temp-buffer
+      (agent-shell-math-renderer-tests--insert-prompt "\\(y\\)" t)
+      (let ((agent-shell-math-renderer-render-submitted-prompts nil)
+            scheduled)
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (&rest _)
+                     (setq scheduled t))))
+          (agent-shell-math-renderer--on-session-restored
+           '((:event . session-restored))))
+        (should-not scheduled)))))
+
+(ert-deftest agent-shell-math-renderer-warns-about-obsolete-options ()
+  ;; Setting an obsolete option non-nil warns once per session, with what
+  ;; `make-obsolete-variable' recorded; nil, and a `let', do not warn.
+  (let ((agent-shell-math-renderer--obsolete-warned nil)
+        (padding (default-value 'agent-shell-math-renderer-padding))
+        (enabled (default-value 'agent-shell-math-renderer-enabled))
+        warnings)
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (_type message &rest _)
+                 (push message warnings))))
+      (unwind-protect
+          (progn
+            (set-default 'agent-shell-math-renderer-padding nil)
+            (cl-progv '(agent-shell-math-renderer-padding) '(2)
+              nil)
+            (should-not warnings)
+            (set-default 'agent-shell-math-renderer-padding 2)
+            (set-default 'agent-shell-math-renderer-padding 3)
+            (set-default 'agent-shell-math-renderer-enabled t)
+            (should (equal
+                     (reverse warnings)
+                     '("`agent-shell-math-renderer-padding' is obsolete since \
+0.12.0; set `agent-shell-math-renderer-padding-inline' and \
+`agent-shell-math-renderer-padding-display'."
+                       "`agent-shell-math-renderer-enabled' is obsolete since \
+0.6.0; add `agent-shell-math-renderer-mode' to `agent-shell-mode-hook'."))))
+        (set-default 'agent-shell-math-renderer-padding padding)
+        (set-default 'agent-shell-math-renderer-enabled enabled)))))
+
+;;; --- Versions --------------------------------------------------------------
+
+(defconst agent-shell-math-renderer-tests--repo-root
+  (expand-file-name ".." (file-name-directory
+                          (or load-file-name buffer-file-name)))
+  "Directory holding the package, `README.md' and `CHANGELOG.md'.")
+
+(defun agent-shell-math-renderer-tests--read-file (file)
+  "Return the contents of FILE, relative to the repository root."
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name file agent-shell-math-renderer-tests--repo-root))
+    (buffer-string)))
+
+(defun agent-shell-math-renderer-tests--header (header)
+  "Return HEADER of the package's source file."
+  (with-temp-buffer
+    (insert (agent-shell-math-renderer-tests--read-file
+             "agent-shell-math-renderer.el"))
+    (lm-header header)))
+
+(defun agent-shell-math-renderer-tests--required-version (package)
+  "Return the version of PACKAGE that `Package-Requires' names."
+  (cadr (assq package (car (read-from-string
+                            (agent-shell-math-renderer-tests--header
+                             "package-requires"))))))
+
+(ert-deftest agent-shell-math-renderer-version-constants-match-the-headers ()
+  ;; Drift guard: `agent-shell-math-renderer-version' is the `Version:'
+  ;; header, and `--backend-version' the backend's floor in
+  ;; `Package-Requires'.
+  (should (equal agent-shell-math-renderer-version
+                 (agent-shell-math-renderer-tests--header "version")))
+  (should (equal agent-shell-math-renderer--backend-version
+                 (agent-shell-math-renderer-tests--required-version
+                  'latex-to-svg-backend))))
+
+(ert-deftest agent-shell-math-renderer-readme-requirements-match-the-header ()
+  ;; Drift guard: the README's requirement lines name the floors in
+  ;; `Package-Requires'.
+  (let ((readme (agent-shell-math-renderer-tests--read-file "README.md")))
+    (should (string-match-p
+             (format "^- \\*\\*Emacs %s\\+\\*\\*$"
+                     (regexp-quote
+                      (agent-shell-math-renderer-tests--required-version
+                       'emacs)))
+             readme))
+    (dolist (package '(agent-shell latex-to-svg-backend))
+      (should (string-match-p
+               (format "^- \\*\\*\\[`%s`\\]([^)]+)\\*\\* (?%s\n? *or newer"
+                       package
+                       (regexp-quote
+                        (agent-shell-math-renderer-tests--required-version
+                         package)))
+               readme)))))
+
+(ert-deftest agent-shell-math-renderer-changelog-not-behind-package-version ()
+  ;; Drift guard: a released section never claims a version the source has
+  ;; not reached.  Between releases the header may run ahead of the newest
+  ;; dated section, with the entries under `[Unreleased]'.
+  (let ((header (agent-shell-math-renderer-tests--header "version"))
+        (changelog (with-temp-buffer
+                     (insert (agent-shell-math-renderer-tests--read-file
+                              "CHANGELOG.md"))
+                     (goto-char (point-min))
+                     (and (re-search-forward "^## \\[\\([0-9.]+\\)\\] - " nil t)
+                          (match-string 1)))))
+    (should (stringp changelog))
+    (should (version<= changelog header))))
+
+(ert-deftest agent-shell-math-renderer-check-backend-version ()
+  "`agent-shell-math-renderer--check-backend-version' signals an error
+when the loaded backend is older than the floor or has no version."
+  (let ((agent-shell-math-renderer-version "0.15.0")
+        (agent-shell-math-renderer--backend-version "0.16.1"))
+    (let ((latex-to-svg-backend-version "0.16.1"))
+      (agent-shell-math-renderer--check-backend-version))
+    (let ((latex-to-svg-backend-version "0.17.0"))
+      (agent-shell-math-renderer--check-backend-version))
+    (let ((latex-to-svg-backend-version "0.16.0"))
+      (should (string-match-p
+               "\\`agent-shell-math-renderer 0\\.15\\.0 needs \
+latex-to-svg-backend 0\\.16\\.1 or newer, but Emacs loaded version \
+0\\.16\\.0 from .+\\.  Update latex-to-svg-backend to 0\\.16\\.1 or \
+newer, then restart Emacs\\'"
+               (cadr (should-error
+                      (agent-shell-math-renderer--check-backend-version))))))
+    (let ((latex-to-svg-backend-version nil))
+      (should (string-match-p
+               "loaded a version older than 0\\.16\\.1 from "
+               (cadr (should-error
+                      (agent-shell-math-renderer--check-backend-version))))))))
 
 (provide 'agent-shell-math-renderer-tests)
 

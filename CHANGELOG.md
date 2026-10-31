@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `latex-to-svg-backend` 0.18.1. Before it, the texres engine
+  cut off the right side of an equation wider than the `varwidth` box
+  (`latex-to-svg-backend-line-width`, default `\linewidth` ≈ 345pt).
+
 ### Fixed
 
 - An equation inside a table cell is no longer drawn once per wrapped
@@ -22,6 +28,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finished compile now re-finds the region by its properties — every
   region tagged for the same LaTeX with no image — and lays the image
   where the region is now.
+- Take the backend's OUTCOME argument in the `:callback', as
+  `latex-to-svg-backend` 0.15.0 requires, and show a failed equation
+  instead of leaving it raw.
+
+## [0.17.1] - 2026-10-27
+
+### Changed
+
+- Requires agent-shell 0.89.4 or newer. Since that release agent-shell
+  leaves the text after a render function's watermark untouched for the
+  rest of the chunk (xenodium/agent-shell#915), so the package no longer
+  freezes an equation that is still streaming to keep agent-shell's
+  escape pass from turning `\(` into `(` or `\[` into `[`.
+
+## [0.17.0] - 2026-10-23
+
+### Added
+
+- Setting the obsolete `agent-shell-math-renderer-padding` or
+  `agent-shell-math-renderer-enabled` non-nil shows a warning, once per
+  session, that says what to set instead. Before, Emacs reported them only
+  when it compiled the code that set them, which an init file seldom is.
+  The obsolete names `agent-shell-math-renderer-background-padding`,
+  `agent-shell-math-renderer-inline-rescale` and
+  `agent-shell-math-renderer-display-rescale` warn when they are set before
+  the package loads, as an init file does; set after it loads, they cannot
+  be told from the options they name.
+
+### Changed
+
+- Requires `latex-to-svg-backend` 0.18.0. Its 0.17.0 renames
+  `latex-to-svg-backend-preamble` to `latex-to-svg-backend-preamble-base`.
+  The old name still works and shows a warning.
+- The equations follow the names of `latex-to-svg-backend` 0.18.0:
+  setting `latex-to-svg-backend-preamble-not-precompiled` or
+  `latex-to-svg-backend-preamble-not-precompiled-files` updates them.
+  The obsolete `-preamble-macros` and `-preamble-macro-files` still
+  work. The README puts macro files in
+  `latex-to-svg-backend-preamble-packages`, listed in
+  `latex-to-svg-backend-preamble-package-files`.
+- Requires agent-shell 0.89.1 or newer. The prompts of a restored session
+  are found with `agent-shell-prompt-ranges`, which agent-shell added for
+  this package (xenodium/agent-shell#882), instead of by the
+  `user_message_chunk` id agent-shell builds internally. Text typed into
+  the live prompt while a session is restored is not rendered.
+
+## [0.16.0] - 2026-10-20
+
+### Added
+
+- Setting `latex-to-svg-backend-preamble-package-files` or
+  `latex-to-svg-backend-preamble-macro-files`, the files the project's
+  preambles load (backend 0.16.0), updates the equations, as setting a
+  preamble does. The README's section on a project's preamble describes
+  the four options.
+- Loading the package over a `latex-to-svg-backend` older than the one it
+  requires signals an error that names the backend's file and says to
+  update the backend and restart Emacs. Before, an old backend failed at
+  the first equation with an error about a keyword argument such as
+  `:x-height`. `Package-Requires` does not prevent this: straight does
+  not check versions, and after an upgrade in a running Emacs the backend
+  loaded before stays loaded (latex-to-svg issue #12).
+  `agent-shell-math-renderer-version` holds the package's version.
+
+### Changed
+
+- Requires latex-to-svg-backend 0.16.1 or newer, whose option names
+  (`latex-to-svg-backend-preamble-packages`,
+  `latex-to-svg-backend-preamble-macros`) and file lists the README and
+  the watched options use, and whose `latex-to-svg-backend-version` the
+  check at load reads.
+
+## [0.15.0] - 2026-10-18
+
+### Added
+
+- An equation that no engine could typeset shows a warning icon before its
+  source, with the tooltip of the source: the engine, the error and the
+  command that opens the log (latex-to-svg issue #7). Before, it looked
+  like an equation not typeset yet. `agent-shell-math-renderer-failure-mark`
+  (default t) turns it off; `customize-icon` changes the icon
+  (`agent-shell-math-renderer-failure`).
+- `agent-shell-math-renderer-show-error-log` opens the log of the failed
+  equation at point, or shows the error in the echo area when there is no
+  log. The tooltip of a failed equation names it.
+
+### Changed
+
+- A color option (`agent-shell-math-renderer-foreground-color`,
+  `agent-shell-math-renderer-background-color`) whose value is not a color
+  is reported when `agent-shell-math-renderer-mode` turns on and when an
+  option of this package is set, in each buffer with equations, instead of
+  once for the life of the Emacs process, when an equation was first
+  drawn. Drawing an equation ignores such a value with no warning, as it
+  ignored it before after the first warning.
+
+## [0.14.0] - 2026-10-14
+
+### Changed
+
+- Requires latex-to-svg-backend 0.15.0 or newer. That backend reports to
+  this package whether a compile succeeded or failed;
+  agent-shell-math-renderer 0.13.1 and earlier signal
+  `wrong-number-of-arguments` on that report and show no image after any
+  compile. A package that brings in backend 0.15.0, such as latex-to-svg
+  0.22.0, needs this release alongside it.
+- An equation that fails to compile stays as source in the buffer, as in
+  0.13.1. The error is not shown yet.
+
+## [0.13.1] - 2026-10-14
+
+### Changed
+
+- Requires agent-shell 0.67.1 or newer, the first release that emits
+  `session-restored`.
+
+### Fixed
+
+- With `agent-shell-math-renderer-render-submitted-prompts` on, the user
+  prompts of a restored session are rendered too. agent-shell replays
+  them without running its markdown renderer and without emitting
+  `input-submitted`, so they stayed raw LaTeX. They are rendered when
+  agent-shell emits `session-restored`.
 
 ## [0.13.0] - 2026-10-10
 
@@ -542,7 +671,13 @@ Initial release.
   `agent-shell-markdown-render-functions` hook and public range/cache helpers;
   require agent-shell 0.57.4 for `:inline-code-ranges`.
 
-[Unreleased]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.17.0...v0.17.1
+[0.17.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.13.1...v0.14.0
+[0.13.1]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/alberti42/agent-shell-math-renderer/compare/v0.10.0...v0.11.0

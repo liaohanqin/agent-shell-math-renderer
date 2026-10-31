@@ -6,8 +6,8 @@
 ;; Maintainer: Andrea Alberti <a.alberti82@gmail.com>
 ;; Assisted-by: Claude:claude-opus-4-8
 ;; URL: https://github.com/alberti42/agent-shell-math-renderer
-;; Version: 0.13.0
-;; Package-Requires: ((emacs "29.1") (agent-shell "0.66.1") (latex-to-svg-backend "0.14.0"))
+;; Version: 0.17.1
+;; Package-Requires: ((emacs "29.1") (agent-shell "0.89.4") (latex-to-svg-backend "0.18.1"))
 ;; Keywords: tex, llm, math, education
 
 ;; This package is free software; you can redistribute it and/or modify
@@ -56,6 +56,7 @@
 ;; When `agent-shell-math-renderer-render-submitted-prompts' is non-nil,
 ;; submitted prompts are rendered after they are sent, using the same
 ;; delimiter, inline-math, and fenced-math handling as agent responses.
+;; The prompts a restored session replays are rendered the same way.
 ;; This path obtains the same markdown context through agent-shell's
 ;; public `agent-shell-markdown-context', so it stays in sync with the
 ;; streaming render hook and uses no private agent-shell API.
@@ -67,8 +68,8 @@
 ;; equation to a color- and size-independent SVG (cached on disk by
 ;; content, tinted and scaled at display time).  Compilation is
 ;; asynchronous; the image is overlaid when ready.  When a program of
-;; the engine is not found, the backend warns once per session, naming
-;; the engine and the program, and the source stays as text.  The engine
+;; the engine is not found, the backend warns, naming the engine and
+;; the program, and the source stays as text.  The engine
 ;; that typesets (LaTeX, RaTeX without a TeX installation, or texres) is
 ;; chosen by `agent-shell-math-renderer-engine'.  Backend settings (programs,
 ;; preamble, cache directory, font scale) live in the
@@ -81,9 +82,39 @@
 (require 'agent-shell)
 (require 'agent-shell-markdown)
 (require 'comint)
+(require 'icons)
 (require 'latex-to-svg-backend)
 (require 'map)
 (require 'seq)
+
+(defconst agent-shell-math-renderer-version "0.17.1"
+  "The version of the loaded package, as in the `Version:' header.")
+
+(defconst agent-shell-math-renderer--backend-version "0.18.1"
+  "The oldest `latex-to-svg-backend' this package works with.
+The same version as in the `Package-Requires' header.")
+
+(defun agent-shell-math-renderer--check-backend-version ()
+  "Signal an error if the loaded backend is older than this package needs.
+The backend's version is `latex-to-svg-backend-version', of the backend
+in memory: after an upgrade in a running Emacs, the file on disk can be
+new while the backend loaded before it is old.  A backend with no
+`latex-to-svg-backend-version' is older than 0.16.1, which added it.
+Called when this file is loaded."
+  (let ((version (bound-and-true-p latex-to-svg-backend-version)))
+    (unless (and (stringp version)
+                 (version<= agent-shell-math-renderer--backend-version version))
+      (error "%s %s needs %s %s or newer, but Emacs loaded %s from %s.  \
+Update %s to %s or newer, then restart Emacs"
+             'agent-shell-math-renderer agent-shell-math-renderer-version
+             'latex-to-svg-backend agent-shell-math-renderer--backend-version
+             (if (stringp version)
+                 (concat "version " version)
+               "a version older than 0.16.1")
+             (or (symbol-file 'latex-to-svg-backend 'defun) "an unknown file")
+             'latex-to-svg-backend agent-shell-math-renderer--backend-version))))
+
+(agent-shell-math-renderer--check-backend-version)
 
 (defgroup agent-shell-math-renderer nil
   "Render LaTeX math in agent-shell's streamed markdown output.
@@ -127,9 +158,8 @@ A list whose members are keys of
 
 The two are independent — add or drop one to toggle it.  An empty
 list disables the delimiter styles (fenced math via
-`agent-shell-math-renderer-fence-languages' is separate); the
-master switch `agent-shell-math-renderer-enabled' disables
-everything.
+`agent-shell-math-renderer-fence-languages' is separate); turning
+`agent-shell-math-renderer-mode' off disables everything.
 
 Both styles are matched only as block-level equations: the opener
 must start its line (after optional indentation) and the closer
@@ -146,15 +176,11 @@ collides with your prose."
   :group 'agent-shell-math-renderer)
 
 (defvar agent-shell-math-renderer-mode)
-(defvar agent-shell-math-renderer-enabled)
 
 (defun agent-shell-math-renderer--active-p ()
   "Return non-nil when math rendering should act in the current buffer.
-True when the buffer-local `agent-shell-math-renderer-mode' is on, or the
-obsolete `agent-shell-math-renderer-enabled' switch is set."
-  (or agent-shell-math-renderer-mode
-      (with-suppressed-warnings ((obsolete agent-shell-math-renderer-enabled))
-        agent-shell-math-renderer-enabled)))
+True when the buffer-local `agent-shell-math-renderer-mode' is on."
+  agent-shell-math-renderer-mode)
 
 (defcustom agent-shell-math-renderer-fence-languages '("math")
   "Fenced-code-block languages rendered as display math.
@@ -167,7 +193,7 @@ case-insensitively), e.g.
   ```
 
 is typeset as an equation instead of shown as a code block — but
-only when `agent-shell-math-renderer-enabled' is non-nil.  This
+only when `agent-shell-math-renderer-mode' is on.  This
 complements the `\\=\\[...\\]' / `$$...$$' delimiter styles.
 
 `math' is the sole default because it names a *role*: it is
@@ -190,8 +216,8 @@ Set to nil to leave every fence as code."
 (defcustom agent-shell-math-renderer-render-inline t
   "When non-nil, recognize inline math `\\(...\\)' in agent responses.
 
-Only effective when the master switch
-`agent-shell-math-renderer-enabled' is non-nil.  Inline math is
+Only effective when `agent-shell-math-renderer-mode' is on.
+Inline math is
 typeset in text style and overlaid in place,
 so it sits within the surrounding line rather than on its own.
 
@@ -301,6 +327,58 @@ in a mode hook or in `.dir-locals.el', to silence one kind of chat."
   :safe #'booleanp
   :group 'agent-shell-math-renderer)
 
+(defcustom agent-shell-math-renderer-failure-mark t
+  "Whether to mark an equation that no engine could typeset.
+
+When non-nil (the default), the icon `agent-shell-math-renderer-failure'
+is shown before the source of a failed equation, with the same tooltip
+as the source: the engine, the error, and the command that opens the
+log, `agent-shell-math-renderer-show-error-log'.  When nil, a failed
+equation looks like an equation not typeset yet.  Change the icon with
+`customize-icon'.  Setting the option with `setq', `setq-local' or
+Customize updates the equations on its own."
+  :type 'boolean
+  :safe #'booleanp
+  :group 'agent-shell-math-renderer)
+
+(define-icon agent-shell-math-renderer-failure nil
+  '((emoji "⚠️") (symbol "⚠") (text "[!]"))
+  "Mark before an equation that no engine could typeset.
+See `agent-shell-math-renderer-failure-mark'."
+  :version "29.1")
+
+(defvar agent-shell-math-renderer--obsolete-warned nil
+  "The obsolete options already reported in this session.")
+
+(defun agent-shell-math-renderer--warn-obsolete (option value)
+  "Warn that OPTION is obsolete when VALUE is non-nil, once per session.
+The warning says what `make-obsolete-variable' recorded for OPTION: the
+version and what to set instead.  Emacs reports an obsolete variable
+only when it compiles the code that sets it, which an init file seldom
+is."
+  (when (and value
+             (not (memq option agent-shell-math-renderer--obsolete-warned)))
+    (push option agent-shell-math-renderer--obsolete-warned)
+    (pcase-let ((`(,current ,_ ,version) (get option 'byte-obsolete-variable)))
+      (display-warning
+       'agent-shell-math-renderer
+       (format "`%s' is obsolete since %s; %s" option version
+               (if (stringp current)
+                   current
+                 (format "use `%s' instead." current)))
+       :warning))))
+
+(defconst agent-shell-math-renderer--obsolete-aliases-set
+  (seq-filter (lambda (alias)
+                (or (boundp alias) (get alias 'saved-value)))
+              '(agent-shell-math-renderer-inline-rescale
+                agent-shell-math-renderer-display-rescale
+                agent-shell-math-renderer-background-padding))
+  "The obsolete aliases the user set before this file loaded.
+An alias bound, or saved by Customize, before this file defines it was
+set by the user's init file.  Once the alias exists, setting it cannot
+be told from setting its option: both are one variable.")
+
 ;; Before the defcustoms on purpose, like the padding alias below:
 ;; `defvaralias' discards a value the obsolete name already holds.
 (define-obsolete-variable-alias 'agent-shell-math-renderer-inline-rescale
@@ -398,6 +476,12 @@ string; it applies from cache (no recompile).  Setting it with
 ;; this file loads would silently lose it if the alias came afterwards.
 (define-obsolete-variable-alias 'agent-shell-math-renderer-background-padding
   'agent-shell-math-renderer-padding "0.10.0")
+;; The option it names is obsolete too, so say what to set instead.
+(make-obsolete-variable
+ 'agent-shell-math-renderer-background-padding
+ "set `agent-shell-math-renderer-padding-inline' and \
+`agent-shell-math-renderer-padding-display'."
+ "0.10.0")
 
 (defconst agent-shell-math-renderer--padding-type
   '(choice (const :tag "None" nil)
@@ -479,7 +563,7 @@ the equations on its own."
   "When non-nil, render math in submitted user prompts.
 
 This option has an effect only when
-`agent-shell-math-renderer-enabled' is also non-nil.
+`agent-shell-math-renderer-mode' is also on.
 
 The usual delimiter and inline settings apply: prompts render
 `\\=\\[...\\]' / `$$...$$' according to
@@ -489,7 +573,10 @@ according to `agent-shell-math-renderer-render-inline'.
 This uses agent-shell's existing `input-submitted' event and
 shell-maker/comint's `comint-last-input-start' /
 `comint-last-input-end' markers to find the prompt that was just
-submitted.  Rendering is deferred out of the submit command."
+submitted.  Rendering is deferred out of the submit command.
+
+The prompts a restored session replays are rendered too, when
+agent-shell emits `session-restored'."
   :type 'boolean
   :safe #'booleanp
   :group 'agent-shell-math-renderer)
@@ -508,8 +595,8 @@ an equation renders.")
   "Non-nil in a buffer that has rendered display-math regions.
 Lets `agent-shell-math-renderer-refresh' visit only relevant buffers.")
 
-(defvar-local agent-shell-math-renderer--prompt-subscription nil
-  "Subscription token for submitted-prompt rendering in this buffer.")
+(defvar-local agent-shell-math-renderer--prompt-subscriptions nil
+  "Subscription tokens for submitted-prompt rendering in this buffer.")
 
 (defun agent-shell-math-renderer--delimiter-flush-p (start end)
   "Return non-nil if the delimiter spanning START..END is flush on its line.
@@ -870,6 +957,99 @@ says so: \"Typeset with LaTeX (RaTeX could not parse it): LATEX\"."
             ": "
             (agent-shell-math-renderer--help-echo-text latex))))
 
+(defun agent-shell-math-renderer--failure-help-echo (failure &optional tooltip)
+  "Return the `help-echo' of an equation whose request ended in FAILURE.
+FAILURE is the plist the backend passes to the callback (see
+`latex-to-svg-backend').  For a `formula' failure it names the engine
+and gives the message: \"LaTeX could not typeset it: MESSAGE.\", or
+\"RaTeX could not parse it: MESSAGE.\".  For a `setup' failure it gives
+the message, which names the program that was not found or says that
+the preamble could not be precompiled.  The text
+ends with a full stop, unless it already ends with `.', `!' or `?'.
+With TOOLTIP, when FAILURE has a log, a sentence follows on the same
+line, so that a tooltip shown on one line reads well: \"Call
+\\[agent-shell-math-renderer-show-error-log] with point in the equation
+to open the log.\"  The log file is not named."
+  (let* ((engine (plist-get failure :engine))
+         (message (plist-get failure :message))
+         (text (if (eq (plist-get failure :kind) 'setup)
+                   (or message
+                       (format "%s could not run `%s'"
+                               (agent-shell-math-renderer--engine-name engine)
+                               (plist-get failure :program)))
+                 (concat (format "%s could not %s it"
+                                 (agent-shell-math-renderer--engine-name engine)
+                                 (if (eq engine 'ratex) "parse" "typeset"))
+                         (and message (concat ": " message))))))
+    (concat (agent-shell-math-renderer--help-echo-text
+             (if (string-match-p "[.!?]\\'" text) text (concat text ".")))
+            (and tooltip (plist-get failure :log)
+                 " Call \\[agent-shell-math-renderer-show-error-log] with \
+point in the equation to open the log."))))
+
+(defun agent-shell-math-renderer--show-failure (buffer start end failure)
+  "Record FAILURE on BUFFER's equation START..END and mark it.
+FAILURE is the plist the backend passed to the callback.  It is stored
+in the `agent-shell-math-renderer-failure' text property and shown as
+the `help-echo' (see `agent-shell-math-renderer--failure-help-echo').
+With `agent-shell-math-renderer-failure-mark' on, an overlay over the
+equation shows the icon `agent-shell-math-renderer-failure' as its
+`before-string', with the same tooltip; an overlay, so that copying the
+equation does not copy the icon.  START / END may be markers.  Nothing
+is done when BUFFER is dead or the region no longer holds an equation."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((s (if (markerp start) (marker-position start) start))
+            (e (if (markerp end) (marker-position end) end))
+            (help-echo (agent-shell-math-renderer--failure-help-echo
+                        failure t)))
+        (when-let* (((and s e (<= (point-min) s) (< s e) (<= e (point-max))))
+                    (latex (get-text-property
+                            s 'agent-shell-math-renderer-source)))
+          (agent-shell-math-renderer--clear-failure s e latex)
+          (with-silent-modifications
+            (put-text-property s e 'agent-shell-math-renderer-failure failure)
+            (put-text-property s e 'help-echo help-echo))
+          (when agent-shell-math-renderer-failure-mark
+            (let ((ov (make-overlay s e)))
+              (overlay-put ov 'agent-shell-math-renderer-failure t)
+              (overlay-put ov 'evaporate t)
+              (overlay-put ov 'before-string
+                           (concat (propertize
+                                    (icon-string
+                                     'agent-shell-math-renderer-failure)
+                                    'help-echo help-echo)
+                                   " ")))))))))
+
+(defun agent-shell-math-renderer--clear-failure (start end latex)
+  "Remove the failure of the equation LATEX at START..END, if it has one.
+Deletes the failure mark, removes the `agent-shell-math-renderer-failure'
+text property, and gives the region back the `help-echo' of its source.
+Runs in the equation's buffer, before each render."
+  (when (get-text-property start 'agent-shell-math-renderer-failure)
+    (with-silent-modifications
+      (remove-text-properties start end '(agent-shell-math-renderer-failure nil))
+      (put-text-property start end 'help-echo
+                         (agent-shell-math-renderer--help-echo-text latex))))
+  (dolist (ov (overlays-in start end))
+    (when (overlay-get ov 'agent-shell-math-renderer-failure)
+      (delete-overlay ov))))
+
+(defun agent-shell-math-renderer-show-error-log ()
+  "Open the log of the equation at point that no engine could typeset.
+When the failure has no log (a RaTeX parse error, or a program that
+could not run) or the log file is gone, show the error in the echo
+area instead."
+  (interactive)
+  (let* ((failure (get-text-property (point) 'agent-shell-math-renderer-failure))
+         (log (plist-get failure :log)))
+    (cond
+     ((null failure) (user-error "No equation here failed to typeset"))
+     ((and log (file-exists-p log)) (find-file-other-window log))
+     (t (message "%s" (substitute-command-keys
+                       (agent-shell-math-renderer--failure-help-echo
+                        failure)))))))
+
 (defun agent-shell-math-renderer--apply-region (buffer start end latex &optional inline)
   "Mark BUFFER's START..END as math with source LATEX and render it.
 
@@ -1131,7 +1311,8 @@ size, slot 2 of `query-font', times its ratio
 \(`agent-shell-math-renderer--x-height-ratio').  The faces at POS and
 their `:height' apply, and so does `text-scale-mode'; so would a
 `:height' on the face `agent-shell-math-renderer', which sets none.
-When no font is found at POS, or it has no glyph for `x', it is
+When POS is outside the accessible part of BUFFER, no font is found
+at POS, or the font has no glyph for `x', it is
 `agent-shell-math-renderer--x-height', which is nil when BUFFER is
 shown in no graphical window.  It mirrors the latex-to-svg front-end's
 function of the same name."
@@ -1139,7 +1320,8 @@ function of the same name."
     (or (when-let* ((win (agent-shell-math-renderer--display-window buffer)))
           (with-selected-frame (window-frame win)
             (with-current-buffer buffer
-              (when-let* ((font (ignore-errors (font-at pos win)))
+              (when-let* ((font (and (<= (point-min) pos) (< pos (point-max))
+                                     (font-at pos win)))
                           (info (query-font font))
                           (ratio (agent-shell-math-renderer--x-height-ratio
                                   (aref info 0) (window-frame win))))
@@ -1179,25 +1361,40 @@ when COLOR is nil or FRAME cannot resolve it."
            (apply #'format "#%02x%02x%02x"
                   (mapcar (lambda (v) (round (* v 255) 65535)) values))))))
 
-(defvar agent-shell-math-renderer--warned-colors nil
-  "The (OPTION . VALUE) pairs reported as colors no frame resolved.")
-
 (defun agent-shell-math-renderer--option-color (option frame)
   "Return the color in OPTION as a `#rrggbb' string resolved on FRAME, or nil.
 Nil when OPTION is nil.  A value FRAME cannot resolve, or one that is
-not a string, is nil too, and is reported once with `display-warning'."
+not a string, is nil too, with no warning: this runs for every
+equation drawn.  `agent-shell-math-renderer--check-options' reports
+such a value when the mode turns on."
   (when-let* ((color (symbol-value option)))
-    (or (and (stringp color)
-             (agent-shell-math-renderer--hex-color color frame))
-        (let ((pair (cons option color)))
-          (unless (member pair agent-shell-math-renderer--warned-colors)
-            (push pair agent-shell-math-renderer--warned-colors)
-            (display-warning
-             'agent-shell-math-renderer
-             (format "Cannot resolve `%s' (%S) as a color; ignoring it"
-                     option color)
-             :warning))
-          nil))))
+    (and (stringp color)
+         (agent-shell-math-renderer--hex-color color frame))))
+
+(defun agent-shell-math-renderer--check-options ()
+  "Warn about each color option whose value is not a color.
+Run when the mode turns on, and in each buffer updated after a watched
+option changed (see `agent-shell-math-renderer--update-after-option').
+The options are `agent-shell-math-renderer-foreground-color' and
+`agent-shell-math-renderer-background-color'; a value that is not a
+string, or that a graphical frame cannot resolve, is ignored when
+equations are drawn (see `agent-shell-math-renderer--option-color').  A
+color resolves on a frame, so the check uses the frame that shows the
+buffer, else any graphical frame; with none, as in a daemon that has
+opened no graphical frame yet, it checks nothing."
+  (when-let* ((frame (or (agent-shell-math-renderer--display-frame
+                          (current-buffer))
+                         (seq-find #'display-graphic-p (frame-list)))))
+    (dolist (option '(agent-shell-math-renderer-foreground-color
+                      agent-shell-math-renderer-background-color))
+      (when-let* ((color (symbol-value option))
+                  ((not (agent-shell-math-renderer--option-color
+                         option frame))))
+        (display-warning
+         'agent-shell-math-renderer
+         (format "%s: `%s' is %S, which is not a color; ignoring it"
+                 (buffer-name) option color)
+         :warning)))))
 
 (defun agent-shell-math-renderer--text-foreground (pos &optional frame)
   "Return the foreground the faces of the text at POS give it, or nil.
@@ -1356,7 +1553,10 @@ BUFFER is shown in no graphical window, all three are nil: the backend
 compiles the SVG and returns no image, and the display hook re-renders
 once the buffer is shown, from the cache.  The callback of an
 async compile reads all three again, on the frame that shows BUFFER
-then."
+then.  When the request ends without a picture, the callback leaves
+the source as it is and marks it (see
+`agent-shell-math-renderer--show-failure'); each render first removes
+the mark of the previous one."
   (let ((frame (agent-shell-math-renderer--display-frame buffer)))
     (cond
      ((not (agent-shell-math-renderer--graphical-p))
@@ -1366,6 +1566,7 @@ then."
       (with-current-buffer buffer
         (setq agent-shell-math-renderer--rendered-appearance nil)))
      (t
+      (agent-shell-math-renderer--clear-failure start end latex)
       (let* ((x-height (agent-shell-math-renderer--x-height-at start buffer))
              (doc (agent-shell-math-renderer--wrap latex inline))
              (engine agent-shell-math-renderer-engine)
@@ -1401,47 +1602,49 @@ then."
              :rescale-by rescale :color color
              :background background :padding padding :x-height x-height
              :callback
-             (lambda ()
-               (when (buffer-live-p buffer)
-                 (with-current-buffer buffer
-                   ;; Read again: the buffer may be displayed now even if it
-                   ;; was not when the compile was scheduled, or on another
-                   ;; frame.
-                   (let* ((frame (agent-shell-math-renderer--display-frame
-                                  buffer))
-                          (image (latex-to-svg-backend
-                                  doc :engine engine :fallback fallback
-                                  :quiet quiet
-                                  :rescale-by rescale
-                                  :color (agent-shell-math-renderer--foreground-for
-                                          s frame)
-                                  :background (agent-shell-math-renderer--background-for
-                                               frame)
-                                  :padding padding
-                                  :x-height (agent-shell-math-renderer--x-height-at
-                                             s buffer)))
-                          (echo (agent-shell-math-renderer--help-echo
-                                 doc latex engine fallback)))
-                     (if (and (marker-position s)
-                              (marker-position e)
-                              (<= (point-min) (marker-position s))
-                              (< (marker-position s) (marker-position e))
-                              (<= (marker-position e) (point-max)))
-                         (agent-shell-math-renderer--overlay-image
-                          buffer s e image inline echo)
-                       ;; The claimed text may have been rewritten in place
-                       ;; since scheduling — a pass such as agent-shell's
-                       ;; table pass deletes and re-inserts the region,
-                       ;; carrying our properties over while collapsing the
-                       ;; markers above — so re-find the region by its
-                       ;; properties and lay the image where it is now
-                       ;; (see `--unrendered-regions').
-                       (when image
-                         (dolist (region (agent-shell-math-renderer--unrendered-regions
-                                          latex inline))
+             (lambda (outcome)
+               (if outcome
+                   (agent-shell-math-renderer--show-failure buffer s e outcome)
+                 (when (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     ;; Read again: the buffer may be displayed now even if it
+                     ;; was not when the compile was scheduled, or on another
+                     ;; frame.
+                     (let* ((frame (agent-shell-math-renderer--display-frame
+                                    buffer))
+                            (image (latex-to-svg-backend
+                                    doc :engine engine :fallback fallback
+                                    :quiet quiet
+                                    :rescale-by rescale
+                                    :color (agent-shell-math-renderer--foreground-for
+                                            s frame)
+                                    :background (agent-shell-math-renderer--background-for
+                                                 frame)
+                                    :padding padding
+                                    :x-height (agent-shell-math-renderer--x-height-at
+                                               s buffer)))
+                            (echo (agent-shell-math-renderer--help-echo
+                                   doc latex engine fallback)))
+                       (if (and (marker-position s)
+                                (marker-position e)
+                                (<= (point-min) (marker-position s))
+                                (< (marker-position s) (marker-position e))
+                                (<= (marker-position e) (point-max)))
                            (agent-shell-math-renderer--overlay-image
-                            buffer (car region) (cdr region) image inline
-                            echo))))))))))))))))
+                            buffer s e image inline echo)
+                         ;; The claimed text may have been rewritten in place
+                         ;; since scheduling — a pass such as agent-shell's
+                         ;; table pass deletes and re-inserts the region,
+                         ;; carrying our properties over while collapsing the
+                         ;; markers above — so re-find the region by its
+                         ;; properties and lay the image where it is now
+                         ;; (see `--unrendered-regions').
+                         (when image
+                           (dolist (region (agent-shell-math-renderer--unrendered-regions
+                                            latex inline))
+                             (agent-shell-math-renderer--overlay-image
+                              buffer (car region) (cdr region) image inline
+                              echo)))))))))))))))))
 
 (defun agent-shell-math-renderer--refresh-buffer (buffer &optional recompile)
   "Re-render every display-math region in BUFFER for the current colors.
@@ -1530,14 +1733,17 @@ fast and untouched buffers refresh lazily when next displayed."
     agent-shell-math-renderer-rescale-inline
     agent-shell-math-renderer-rescale-display
     agent-shell-math-renderer-center-display-math
-    latex-to-svg-backend-preamble
-    latex-to-svg-backend-appended-preamble
+    agent-shell-math-renderer-failure-mark
+    latex-to-svg-backend-preamble-base
+    latex-to-svg-backend-preamble-packages
     latex-to-svg-backend-preamble-not-precompiled
+    latex-to-svg-backend-preamble-package-files
+    latex-to-svg-backend-preamble-not-precompiled-files
     latex-to-svg-backend-line-width
     latex-to-svg-backend-ratex-macros)
   "Options whose change updates the equations on its own.
 Each has a variable watcher (`agent-shell-math-renderer--option-changed').
-The last five are the backend's options in the cache key, which a
+The last seven are the backend's options in the cache key, which a
 project sets in `.dir-locals.el'.")
 
 (defvar agent-shell-math-renderer--option-buffers nil
@@ -1574,7 +1780,10 @@ in one go (a block of `setq's in an init file)."
   "Re-render the buffers `--option-changed' collected.
 That is each buffer with rendered equations whose local value of a
 watched option changed, or that has no local value of an option whose
-default changed (see `agent-shell-math-renderer--refresh-buffer')."
+default changed (see `agent-shell-math-renderer--refresh-buffer').
+Each is checked first (see `agent-shell-math-renderer--check-options'),
+so a color option set to a value that is not a color warns once per
+buffer."
   (let ((buffers agent-shell-math-renderer--option-buffers)
         (defaults agent-shell-math-renderer--option-defaults))
     (setq agent-shell-math-renderer--option-buffers nil
@@ -1587,6 +1796,8 @@ default changed (see `agent-shell-math-renderer--refresh-buffer')."
                      (seq-some (lambda (option)
                                  (not (local-variable-p option buf)))
                                defaults)))
+        (with-current-buffer buf
+          (agent-shell-math-renderer--check-options))
         (agent-shell-math-renderer--refresh-buffer buf)))))
 
 (dolist (option agent-shell-math-renderer--watched-options)
@@ -1709,93 +1920,50 @@ agent-shell-markdown\'s `:block' positions."
                    (map-nested-elt sb '(:block :end))))
            source-blocks)))
 
-(defun agent-shell-math-renderer--release-inline-pending ()
-  "Lift inline-tail streaming protection left by the previous chunk.
-
-`--protect-inline-tail' freezes a still-open inline `\\(' (tagged
-`agent-shell-math-renderer--inline-pending') so agent-shell's escape
-pass can't unescape its backslash (`\\(' -> `(') before the closer
-streams in.  But `--style-inline' skips frozen text, so that
-protection has to be lifted before the inline pass re-scans, or a
-now-complete span would never render.  Removes the freeze and the
-pending tag over every pending region; `--protect-inline-tail'
-re-applies them if the span is still open after this chunk."
-  (let ((pos (point-min)))
-    (while (setq pos (text-property-any
-                      pos (point-max)
-                      'agent-shell-math-renderer--inline-pending t))
-      (let ((end (next-single-property-change
-                  pos 'agent-shell-math-renderer--inline-pending
-                  nil (point-max))))
-        (remove-text-properties
-         pos end
-         '(agent-shell-markdown-frozen nil
-                                       agent-shell-math-renderer--inline-pending nil))
-        (setq pos end)))))
-
-(defun agent-shell-math-renderer--protect-inline-tail (avoid-ranges)
-  "Freeze a still-open inline `\\(' on the last line; return its marker.
+(defun agent-shell-math-renderer--inline-tail (avoid-ranges)
+  "Return a marker at a still-open inline `\\(' on the last line, or nil.
 
 An unclosed inline `\\(' whose `\\)' hasn't streamed in yet sits on the
-buffer's last line.  Left as ordinary text it is claimed by
-agent-shell's CommonMark escape pass (`\\(' -> `('), destroying the
-opener before the closer arrives on the next chunk (agent-shell
-0.66.1+).  Display math avoids this because `--style-blocks' freezes
-its open block; inline needs the same, but tagged
-`agent-shell-math-renderer--inline-pending' (and lifted by
-`--release-inline-pending' next chunk) because `--style-inline' skips
-frozen text.
-
-Freezes from the first still-open opener to `point-max' and returns a
-marker there (mirroring the display open-block watermark) so
-`agent-shell' holds the streaming frontier before the `\\(' and re-scans
-it next chunk.  An opener already frozen (rendered math), inside
-AVOID-RANGES, escaped (`\\\\('), or followed by its `\\)' on the line is
-not a streaming tail; returns nil when none remains open."
+buffer's last line.  Returned as the `:watermark', the marker makes
+`agent-shell' leave the text from the `\\(' on as it is for the rest of
+the chunk (agent-shell 0.89.4), so its escape pass cannot turn `\\('
+into `(', and re-scan it next chunk.  An opener already frozen
+\(rendered math), inside AVOID-RANGES, escaped (`\\\\('), or followed by
+its `\\)' on the line is not a streaming tail."
   (let ((open-re (regexp-quote agent-shell-math-renderer--inline-open))
         (close-re (regexp-quote agent-shell-math-renderer--inline-close))
         (case-fold-search nil))
     (save-excursion
-      (let ((opener (catch 'found
-                      (goto-char (point-max))
-                      (beginning-of-line)
-                      (while (agent-shell-math-renderer--re-search-unescaped-forward
-                              open-re)
-                        (let ((os (match-beginning 0))
-                              (oe (match-end 0)))
-                          (when (and (not (agent-shell-markdown-in-avoid-range-p
-                                           os oe avoid-ranges))
-                                     (not (get-text-property
-                                           os 'agent-shell-markdown-frozen))
-                                     (not (save-excursion
-                                            (goto-char oe)
-                                            (agent-shell-math-renderer--re-search-unescaped-forward
-                                             close-re))))
-                            (throw 'found os))))
-                      nil)))
-        (when opener
-          (put-text-property opener (point-max) 'agent-shell-markdown-frozen t)
-          (put-text-property opener (point-max)
-                             'agent-shell-math-renderer--inline-pending t)
-          (copy-marker opener))))))
+      (goto-char (point-max))
+      (beginning-of-line)
+      (catch 'found
+        (while (agent-shell-math-renderer--re-search-unescaped-forward
+                open-re)
+          (let ((os (match-beginning 0))
+                (oe (match-end 0)))
+            (when (and (not (agent-shell-markdown-in-avoid-range-p
+                             os oe avoid-ranges))
+                       (not (get-text-property
+                             os 'agent-shell-markdown-frozen))
+                       (not (save-excursion
+                              (goto-char oe)
+                              (agent-shell-math-renderer--re-search-unescaped-forward
+                               close-re))))
+              (throw 'found (copy-marker os)))))
+        nil))))
 
 (defun agent-shell-math-renderer--render-context (context &optional streaming)
   "Render math in CONTEXT.
 
 CONTEXT is the alist supplied by the `agent-shell' markdown renderer,
 or an equivalent alist built for a submitted prompt.  When
-STREAMING is non-nil, protect still-open display blocks and inline
-spans and return a `:watermark' result for `agent-shell'."
+STREAMING is non-nil, return a `:watermark' result for `agent-shell'
+at the earliest still-open display block or inline span."
   (let* ((source-blocks (map-elt context :source-blocks))
          (inline-code-ranges (map-elt context :inline-code-ranges))
          (source-ranges
           (agent-shell-math-renderer--source-ranges source-blocks))
          (watermarks '()))
-    ;; Lift any inline-tail protection from the previous chunk first, so a
-    ;; span whose closer just arrived is re-detected by `--style-inline'
-    ;; below (which skips frozen text).
-    (when streaming
-      (agent-shell-math-renderer--release-inline-pending))
     (agent-shell-math-renderer--style-blocks :avoid-ranges source-ranges)
     (when streaming
       (let ((open-block (seq-find (lambda (b) (zerop (plist-get b :close)))
@@ -1808,12 +1976,9 @@ spans and return a `:watermark' result for `agent-shell'."
           ;; `\[' down; a plain integer captured now would then point past
           ;; it, so `--update-watermark' would stamp a frontier beyond the
           ;; opener and the next chunk would never re-scan the block (it
-          ;; stays frozen-but-unrendered).  A marker tracks those edits, so
-          ;; the `min' in `--update-watermark' reads its live position.
-          (push (copy-marker (plist-get open-block :start)) watermarks)
-          (put-text-property (plist-get open-block :start)
-                             (plist-get open-block :end)
-                             'agent-shell-markdown-frozen t))))
+          ;; stays unrendered).  A marker tracks those edits, so the `min'
+          ;; in `--update-watermark' reads its live position.
+          (push (copy-marker (plist-get open-block :start)) watermarks))))
     ;; Inline `\(...\)': avoid code fences, display-math blocks, and
     ;; inline `code' spans.  The inline-code ranges come from CONTEXT,
     ;; so a literal `\(x\)' meant as code is not rendered as math.
@@ -1823,10 +1988,10 @@ spans and return a `:watermark' result for `agent-shell'."
                           (agent-shell-math-renderer--block-ranges source-ranges)
                           inline-code-ranges)))
         (agent-shell-math-renderer--style-inline :avoid-ranges math-ranges)
-        ;; Protect a still-open inline `\(' on the last line from agent-shell's
-        ;; escape pass (see `--protect-inline-tail'); hold the frontier there.
+        ;; Hold the frontier at a still-open inline `\(' on the last line
+        ;; (see `--inline-tail').
         (when streaming
-          (when-let* ((wm (agent-shell-math-renderer--protect-inline-tail
+          (when-let* ((wm (agent-shell-math-renderer--inline-tail
                            math-ranges)))
             (push wm watermarks)))))
     ;; Fenced math (```math, per `-fence-languages'): overlay the equation
@@ -1930,22 +2095,55 @@ package's architecture notes for the full history."
   "Render the current buffer's submitted prompt after submit returns."
   (agent-shell-math-renderer--schedule-submitted-prompt (current-buffer)))
 
+(defun agent-shell-math-renderer--replayed-prompt-regions ()
+  "Return markers around the input of each prompt sent in the current buffer.
+The prompts are those `agent-shell-prompt-ranges' returns, less the live
+prompt, whose input starts at the shell process mark."
+  (save-restriction
+    (widen)
+    (let ((live-start (when-let* ((process (get-buffer-process
+                                            (current-buffer))))
+                        (marker-position (process-mark process)))))
+      (seq-keep (lambda (range)
+                  (let ((start (map-elt range :input-start))
+                        (end (map-elt range :input-end)))
+                    (when (and (< start end)
+                               (or (null live-start) (< start live-start)))
+                      (cons (copy-marker start) (copy-marker end)))))
+                (agent-shell-prompt-ranges)))))
+
+(defun agent-shell-math-renderer--on-session-restored (_event)
+  "Render the prompts a session restore replayed in the current buffer.
+agent-shell inserts them without running its markdown renderer and
+without emitting `input-submitted'."
+  (when (and agent-shell-math-renderer-render-submitted-prompts
+             (agent-shell-math-renderer--active-p))
+    (dolist (region (agent-shell-math-renderer--replayed-prompt-regions))
+      (run-at-time 0 nil
+                   #'agent-shell-math-renderer--render-submitted-prompt
+                   (current-buffer) (car region) (cdr region)))))
+
 (defun agent-shell-math-renderer--maybe-subscribe-prompts ()
   "Subscribe current `agent-shell' buffer to submitted-prompt rendering."
-  (unless agent-shell-math-renderer--prompt-subscription
-    (setq-local agent-shell-math-renderer--prompt-subscription
-                (agent-shell-subscribe-to
-                 :shell-buffer (current-buffer)
-                 :event 'input-submitted
-                 :on-event
-                 #'agent-shell-math-renderer--on-input-submitted))))
+  (unless agent-shell-math-renderer--prompt-subscriptions
+    (setq-local agent-shell-math-renderer--prompt-subscriptions
+                (list
+                 (agent-shell-subscribe-to
+                  :shell-buffer (current-buffer)
+                  :event 'input-submitted
+                  :on-event
+                  #'agent-shell-math-renderer--on-input-submitted)
+                 (agent-shell-subscribe-to
+                  :shell-buffer (current-buffer)
+                  :event 'session-restored
+                  :on-event
+                  #'agent-shell-math-renderer--on-session-restored)))))
 
 (defun agent-shell-math-renderer--unsubscribe-prompts ()
   "Unsubscribe the current buffer from submitted-prompt rendering."
-  (when agent-shell-math-renderer--prompt-subscription
-    (agent-shell-unsubscribe
-     :subscription agent-shell-math-renderer--prompt-subscription)
-    (setq-local agent-shell-math-renderer--prompt-subscription nil)))
+  (dolist (subscription agent-shell-math-renderer--prompt-subscriptions)
+    (agent-shell-unsubscribe :subscription subscription))
+  (setq-local agent-shell-math-renderer--prompt-subscriptions nil))
 
 ;;;###autoload
 (define-minor-mode agent-shell-math-renderer-mode
@@ -1972,7 +2170,8 @@ by `agent-shell-math-renderer-delimiters' and
                   #'agent-shell-math-renderer--maybe-refresh nil t)
         (add-hook 'text-scale-mode-hook
                   #'agent-shell-math-renderer--maybe-refresh nil t)
-        (agent-shell-math-renderer--maybe-subscribe-prompts))
+        (agent-shell-math-renderer--maybe-subscribe-prompts)
+        (agent-shell-math-renderer--check-options))
     (remove-hook 'agent-shell-markdown-render-functions
                  #'agent-shell-math-renderer--render-hook t)
     (remove-hook 'window-buffer-change-functions
@@ -2008,8 +2207,34 @@ take effect — use `setopt' or the hook above."
              (when (derived-mode-p 'agent-shell-mode)
                (agent-shell-math-renderer-mode (if value 1 -1))))))
   :group 'agent-shell-math-renderer)
-(make-obsolete-variable 'agent-shell-math-renderer-enabled
-                        'agent-shell-math-renderer-mode "0.6.0")
+(make-obsolete-variable
+ 'agent-shell-math-renderer-enabled
+ "add `agent-shell-math-renderer-mode' to `agent-shell-mode-hook'."
+ "0.6.0")
+
+(defconst agent-shell-math-renderer--obsolete-options
+  '(agent-shell-math-renderer-padding agent-shell-math-renderer-enabled)
+  "The obsolete options reported when they are set non-nil.
+The obsolete aliases are not among them: an alias and its option are
+one variable, so the value does not tell which name the user set.  An
+alias set before this file loaded is reported when it loads (see
+`agent-shell-math-renderer--obsolete-aliases-set').")
+
+(defun agent-shell-math-renderer--obsolete-option-set
+    (symbol newval operation _where)
+  "Report SYMBOL, an obsolete option, when OPERATION sets it to NEWVAL.
+A variable watcher on each of `--obsolete-options'.  It acts on `set'
+only, as `agent-shell-math-renderer--option-changed' does."
+  (when (eq operation 'set)
+    (agent-shell-math-renderer--warn-obsolete symbol newval)))
+
+(dolist (option agent-shell-math-renderer--obsolete-options)
+  (add-variable-watcher option
+                        #'agent-shell-math-renderer--obsolete-option-set)
+  (agent-shell-math-renderer--warn-obsolete option (default-value option)))
+
+(dolist (alias agent-shell-math-renderer--obsolete-aliases-set)
+  (agent-shell-math-renderer--warn-obsolete alias t))
 
 (provide 'agent-shell-math-renderer)
 

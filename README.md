@@ -14,6 +14,9 @@ with [RaTeX](https://github.com/erweixin/RaTeX), and shown as crisp, theme-match
 SVG images — while the original LaTeX stays in the buffer, so copy and save
 round-trip renderable source.
 
+Disclosure: Written with AI assistance (Claude). Every change is reviewed and tested
+by the author, and design decisions are the author's.
+
 [![agent-shell-math-renderer rendering the Schrödinger equation in an agent response](images/demo.jpeg)](https://www.youtube.com/watch?v=wGM3xH06Wso)
 
 *▶ [Watch the ~30-second demo](https://www.youtube.com/watch?v=wGM3xH06Wso) (silent). Toward the end the buffer font size is changed and every equation re-scales to match automatically.*
@@ -73,13 +76,14 @@ inline equation in a heading has the heading's color and size.
 ## Requirements
 
 - **Emacs 29.1+**
-- **[`agent-shell`](https://github.com/xenodium/agent-shell)** (0.66.1 or newer —
-  the release with the backslash-escape pass and the right-label render-function
-  suppression the hook relies on)
-- **[`latex-to-svg-backend`](https://github.com/alberti42/latex-to-svg-backend)** 0.14.0
-  or newer (the release that reads no faces and no frames: this package
-  passes the tint and the x-height it reads on the frame that shows the
-  buffer) — the backend (equation compile, caching, display-time tint/scale)
+- **[`agent-shell`](https://github.com/xenodium/agent-shell)** (0.89.4 or newer —
+  the release that leaves the text after a render function's watermark
+  untouched for the rest of the chunk; `agent-shell-prompt-ranges`, which
+  finds the prompts of a restored session, the backslash-escape pass, the
+  right-label render-function suppression the hook relies on, and the
+  `session-restored` event came in earlier releases)
+- **[`latex-to-svg-backend`](https://github.com/alberti42/latex-to-svg-backend)** 0.18.1
+  or newer (the release whose texres engine keeps the right side of an equation wider than the `varwidth` box; the option names and the file list the README uses, and the version constant this package checks when it is loaded, came in earlier releases) — the backend (equation compile, caching, display-time tint/scale)
   is factored out into this standalone library. All typesetting knobs (LaTeX /
   dvisvgm / RaTeX / texres programs, preamble, cache directory, font scale)
   live in its `latex-to-svg-backend-*` customization group.
@@ -87,8 +91,8 @@ inline equation in a heading has the heading's color and size.
   MacTeX; `dvisvgm` ships with TeX Live), or RaTeX's `render-svg` for the
   `ratex` engine, or texres and `pdftocairo` for the `texres` engine (see
   [Engine](#engine)). When a program of the requested engine is not found, the
-  backend warns once per session, naming the engine and the program, and the
-  equation stays as raw LaTeX text.
+  backend warns, naming the engine and the program, and the equation stays as
+  raw LaTeX text.
 - An Emacs build with **SVG support** for the images (raw LaTeX is shown
   otherwise).
 
@@ -252,25 +256,49 @@ The same works for the other side-effect-free options (`-delimiters`,
 `-rescale-inline`, `-rescale-display`, the color/box options, and the backend's
 `latex-to-svg-backend-font-scale`).
 The backend's toolchain and preamble options (`latex-to-svg-backend-latex-program`,
-`-dvisvgm-program`, `-preamble`, `-appended-preamble`, `-preamble-not-precompiled`,
+`-dvisvgm-program`, `-preamble-base`, `-preamble-packages`, `-preamble-not-precompiled`,
 `-cache-directory`) are
 **not** marked safe — a `.dir-locals.el` lives inside the repo, and those feed a
 compiler or run a program, so Emacs will ask before applying them.
 
 A chat started in a project typesets its equations with the project's preamble
-from `.dir-locals.el`, set in `latex-to-svg-backend-appended-preamble` (for
-packages) or `latex-to-svg-backend-preamble-not-precompiled` (enough for
-macros), such as
-`((nil . ((latex-to-svg-backend-preamble-not-precompiled . "\\input{macros.tex}"))))`
-for a file of macros. The backend README's
+from `.dir-locals.el`. The project's packages, and an `\input` of its macro
+files, go in `latex-to-svg-backend-preamble-packages`, which is appended to
+`latex-to-svg-backend-preamble-base` and dumped into a `.fmt` file of the
+project. List the files it loads in
+`latex-to-svg-backend-preamble-package-files`: an edit of one dumps the `.fmt`
+file again, and compiles the equations again. Names are relative to the
+project root, as for `\input`, or absolute. For example:
+
+```elisp
+((nil . ((latex-to-svg-backend-preamble-packages
+          . "\\usepackage{physics}\n\\input{macros.tex}")
+         (latex-to-svg-backend-preamble-package-files . ("macros.tex")))))
+```
+
+`latex-to-svg-backend-preamble-macros` and
+`latex-to-svg-backend-preamble-macro-files` are obsolete since backend 0.18.0:
+put their macro files in `-preamble-packages` and list them in
+`-preamble-package-files`.
+
+The backend README's
 [A project's preamble](https://github.com/alberti42/latex-to-svg-backend#a-projects-preamble)
-compares the two options and gives the details. Answering `!` to Emacs's
-question trusts only that exact value: the next edit of the string asks again.
-For a project you trust, list its directory, the one holding `.dir-locals.el`,
-in `safe-local-variable-directories` (Emacs 30.1+); Emacs then applies that
-`.dir-locals.el` without asking. After editing `macros.tex`, run
-`C-u M-x agent-shell-math-renderer-refresh` in the chat: it deletes the
-buffer's `.fmt` file and compiles its equations again.
+gives the details. A package that cannot be dumped into the `.fmt` file goes
+in `latex-to-svg-backend-preamble-not-precompiled`: see the backend README's
+[Troubleshooting](https://github.com/alberti42/latex-to-svg-backend#troubleshooting).
+Answering `!` to Emacs's question trusts only that exact value: the next edit
+of the string asks again. The file lists are `:safe`: the backend only reads their files'
+modification times. For a project you trust, list its directory, the one
+holding `.dir-locals.el`, in `safe-local-variable-directories` (Emacs 30.1+);
+Emacs then applies that `.dir-locals.el` without asking.
+
+- **After editing a listed file**, run `M-x agent-shell-math-renderer-refresh`
+  in the chat. An equation requested after the edit is compiled with the new
+  file, but an equation already shown keeps its picture until the package asks
+  for it again, and the refresh does.
+- **After editing a file that is not listed**, run
+  `C-u M-x agent-shell-math-renderer-refresh` in the chat: it deletes the
+  buffer's `.fmt` file and compiles its equations again.
 
 ### Tip: tell the agent to use `\(…\)` for inline math
 
@@ -327,7 +355,7 @@ What RaTeX does not typeset:
 
 - **Packages.** A command KaTeX does not have fails to compile: siunitx's
   `\SI` and `\unit`, `\DeclareMathOperator` (use `\operatorname`), and any
-  package in `latex-to-svg-backend-appended-preamble`, which RaTeX does not
+  package in `latex-to-svg-backend-preamble-packages`, which RaTeX does not
   read. Define macros in `latex-to-svg-backend-ratex-macros` instead.
 - **Environments KaTeX does not have**, such as `multline` and `eqnarray`.
 
@@ -361,12 +389,25 @@ retry after a fix the cache cannot see, such as installing a missing TeX
 package or upgrading RaTeX, run `C-u M-x agent-shell-math-renderer-refresh`
 in the chat buffer: it recompiles that buffer's equations, bypassing the cache.
 
+#### Failed equations
+
+When no engine can typeset an equation, its source stays as text. A warning
+icon stands before the source: ⚠️, ⚠ or `[!]`, the first one Emacs can show.
+Hovering over the source or the icon shows the engine, the error and how to
+open the log: "LaTeX could not typeset it: Undefined control sequence. Call
+M-x agent-shell-math-renderer-show-error-log with point in the equation to
+open the log." `M-x agent-shell-math-renderer-show-error-log` with point in
+the equation opens the log; when there is none (RaTeX's errors, a program that
+could not run), it shows the error in the echo area. To remove the icon, set
+`agent-shell-math-renderer-failure-mark` to nil; to change it, `M-x
+customize-icon RET agent-shell-math-renderer-failure`.
+
 #### Quiet failures
 
 The backend warns once per equation per buffer about an equation it cannot
 typeset, naming the buffer and linking to the log. To silence those warnings,
 set `agent-shell-math-renderer-quiet`; the equation then keeps its source as
-text.
+text, with the icon of [Failed equations](#failed-equations).
 Configuration problems, such as missing programs, still warn. Set it
 buffer-locally, in a mode hook or in `.dir-locals.el`, to silence one kind of
 chat.
@@ -382,7 +423,7 @@ folded into the cache key, so changing it invalidates stale images
 automatically:
 
 ```elisp
-(setq latex-to-svg-backend-appended-preamble
+(setq latex-to-svg-backend-preamble-packages
       "\\usepackage{physics}
 \\usepackage{siunitx}")
 ```
@@ -418,6 +459,7 @@ group (`M-x customize-group RET agent-shell-math-renderer`):
 | `agent-shell-math-renderer-engine` | `latex` | Engine that typesets the equations: `latex` (`latex` + `dvisvgm`), `ratex` (RaTeX's `render-svg`) or `texres` (the `pdflatex` of texres + `pdftocairo`). See [Engine](#engine). Setting it updates the equations on its own. |
 | `agent-shell-math-renderer-fallback` | `t` | Typeset with LaTeX an equation the engine rejects, when the engine is `ratex`. See [Falling back to LaTeX](#falling-back-to-latex). |
 | `agent-shell-math-renderer-quiet` | `nil` | Drop the backend's warning about an equation it cannot typeset. Configuration problems still warn. See [Quiet failures](#quiet-failures). |
+| `agent-shell-math-renderer-failure-mark` | `t` | Show a warning icon before an equation that no engine could typeset. See [Failed equations](#failed-equations). |
 | `agent-shell-math-renderer-rescale-inline` | `1.0` | Size multiplier for inline `\(…\)` math, on top of the backend's `latex-to-svg-backend-font-scale`. Re-scales from cache; setting it updates the equations on its own. |
 | `agent-shell-math-renderer-rescale-display` | `1.0` | Size multiplier for display math (`\[…\]`, `$$…$$`, fenced), on top of `latex-to-svg-backend-font-scale`. Re-scales from cache; setting it updates the equations on its own. |
 | `agent-shell-math-renderer-foreground-color` | `nil` | Color of equations in text drawn in the default foreground. An equation in colored text (a heading, a link) keeps the color of that text. `nil` follows the foreground of the `default` face on the frame that shows the buffer (tracks the theme). A name that frame cannot resolve, or a value that is not a string, is reported with a warning and treated as `nil`. Re-tints from cache; setting it updates the equations on its own. |
@@ -435,8 +477,9 @@ in the
 | Option | Default | Description |
 |--------|---------|-------------|
 | `latex-to-svg-backend-font-scale` | `1.0` | Equation size relative to the buffer font (`1.0` = match). |
-| `latex-to-svg-backend-appended-preamble` | `""` | Extra LaTeX appended to the base preamble (load packages here). |
-| `latex-to-svg-backend-preamble` | standalone + amsmath/amssymb/xcolor | The base LaTeX preamble. |
+| `latex-to-svg-backend-preamble-packages` | `""` | Packages appended to the base, dumped into the `.fmt` file. |
+| `latex-to-svg-backend-preamble-package-files` | `nil` | Files `-preamble-packages` loads, whose edits dump the `.fmt` file again and compile the equations again. |
+| `latex-to-svg-backend-preamble-base` | standalone + amsmath/amssymb/xcolor | The document class and base packages; `-preamble-packages` is appended to it. |
 | `latex-to-svg-backend-latex-program` | `"latex"` | Program compiling LaTeX → DVI. |
 | `latex-to-svg-backend-dvisvgm-program` | `"dvisvgm"` | Program converting DVI → SVG. |
 | `latex-to-svg-backend-cache-directory` | `nil` | Where SVGs are cached; `nil` uses `$XDG_CACHE_HOME/latex-to-svg-backend/`. |
@@ -457,7 +500,8 @@ These options update the equations on their own when you set them, with
 | `agent-shell-math-renderer-padding-inline`, `-padding-display` | the pictures are redrawn from cache |
 | `agent-shell-math-renderer-rescale-inline`, `-rescale-display` | the pictures are redrawn from cache |
 | `agent-shell-math-renderer-center-display-math` | the pictures are redrawn from cache |
-| `latex-to-svg-backend-preamble`, `-appended-preamble`, `-preamble-not-precompiled` | the equations are compiled with the new preamble, or taken from cache if compiled with it before |
+| `latex-to-svg-backend-preamble-base`, `-preamble-packages`, `-preamble-not-precompiled` | the equations are compiled with the new preamble, or taken from cache if compiled with it before |
+| `latex-to-svg-backend-preamble-package-files`, `-preamble-not-precompiled-files` | the equations are compiled with the new list, or taken from cache if compiled with it before |
 | `latex-to-svg-backend-line-width` | the numbered equations are compiled with the new width, or taken from cache if compiled with it before |
 | `latex-to-svg-backend-ratex-macros` | the equations typeset with RaTeX are compiled with the new macros, or taken from cache if compiled with them before |
 
